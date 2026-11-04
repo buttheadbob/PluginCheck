@@ -1,0 +1,7 @@
+# Test output: logs, worlds and copies of plugin source
+runs/
+# Downloaded source of other plugins, for the copies stage
+cache/
+__pycache__/
+bin/
+obj/
