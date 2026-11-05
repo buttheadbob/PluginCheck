@@ -40,7 +40,7 @@ shutil.copy(built[0], os.path.join(work, 'plugin.dll'))
 name = f'plugincheck-sdkcopy-{os.getpid()}'
 docker('create', '--name', name, MAGNETAR)
 copied = docker('cp', f'{name}:/opt/magnetar/Libraries/MagnetarInterim/PluginSdk.dll', os.path.join(work, 'PluginSdk.dll'))
-docker('rm', name)
+docker('rm', '-v', name)
 if copied.returncode:
     print(copied.stderr)
     finish('not run', reason='could not copy PluginSdk.dll from the Magnetar image')

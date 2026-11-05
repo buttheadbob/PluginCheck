@@ -89,7 +89,7 @@ def test(version):
     text = logs.stdout + logs.stderr
     open(os.path.join(run_dir, f'quasar-{version}.log'), 'w', encoding='utf-8').write(text)
     docker('stop', '-t', '30', container)
-    docker('rm', '-f', container)
+    docker('rm', '-f', '-v', container)
 
     problems = [l.strip()[:300] for l in text.splitlines()
                 if re.search(r'error CS\d{4}|error MSB\d{4}|ui plugin.*(error|fail)|Unhandled exception|require a completed', l, re.I)]

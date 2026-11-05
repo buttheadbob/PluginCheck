@@ -103,6 +103,11 @@ comes from a player or a command. Never modify game or mod files.
 player's data or an admin action. Client-side checks are not enforcement. For Quasar, check that pages and endpoints
 require the right permission.
 
+- Authority flows down, not up. A command aimed at one player (kick, ban, mute, kill, wipe) must compare ranks, or a lower
+  rank can remove a higher one. The game's own player screen refuses this, so a command that does not is a way around it.
+- Compare commands that do the same thing at different scales. A mass wipe must not need a lower rank than the single form.
+- A destructive command must refuse empty input. Check what it does with no arguments, zero, and a negative number.
+
 ### Supply chain
 
 - List every package, assembly, framework and analyzer reference, including imported props and targets. Resolve
@@ -308,6 +313,16 @@ Found in real reviews. Check for these every time:
 | A license applied over inherited code | Assumed a public repository is free to reuse | See [Legal](#legal) |
 | A patch the game has made redundant | The game fixed it later and the patch stayed | Decompile the patched method and its callers, and compare field by field |
 | Commands with no error path in auto steps | `RunCommand` returns false and nothing is logged | Trace callers |
+| Replies lost when the server runs a command | Torch's `HandleCommandFromServer(string)` keeps them in a list nobody reads | Use the overload with a callback |
+| An inverted condition matches everything on a typo | "not found" reads as "does not have it" | Try `notype` with a misspelled value. Names must be checked before grids are |
+| A workaround that skips game side effects | Reflection or a private call bypasses a public method | Read what the public method does, then test it on a real server |
+| A value read before the game sets it | Entity events fire before the caller finishes setting up | Read the game code after the `Add` call |
+| A setting counts everyone instead of each player | The key is 0 for all entries, so nothing looks wrong | Check the key's value at the moment it is read |
+| A method exists at build time but not at run time | The loader compiles against a different copy of a library than it runs with. Pulsar treats the error as a plugin crash, and ticks stop | Run the code path on a real server. Interim's `Newtonsoft.Json` lacks `JToken.ToString(Formatting)` |
+| A feature that is off by default is never tested | Load tests start with default settings, so they pass while the feature is broken | Turn on each optional feature on a real server, such as Discord logging with a dead webhook |
+| An interval of zero loops every tick | A bad or blank time becomes zero | Enter 00:00:00 and an unreadable value |
+| `24:00:00` means 24 days | `TimeSpan.Parse` reads it that way | Use one strict parser for every time field |
+| A setting applies at once but the text says it waits for Save | The code changed and the text did not | Follow what happens on change, not on Save |
 
 ## Step 4: Report
 

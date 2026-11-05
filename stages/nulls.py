@@ -41,7 +41,7 @@ def copy_out(image, folder, into):
     name = f'plugincheck-nullrefs-{os.getpid()}'
     docker('create', '--name', name, image)
     done = docker('cp', f'{name}:{folder}/.', into)
-    docker('rm', name)
+    docker('rm', '-v', name)
     return done.returncode == 0
 
 

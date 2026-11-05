@@ -119,7 +119,7 @@ docker('stop', '-t', '60', container)
 docker('cp', f'{container}:/run-data/Logs', os.path.join(run_dir, 'torch-logs'))
 for dump in glob.glob(os.path.join(run_dir, 'torch-logs', '*.dmp')):
     os.remove(dump)
-docker('rm', '-f', container)
+docker('rm', '-f', '-v', container)
 docker('volume', 'rm', volume)
 loaded = re.search(r"Loading plugin '([^']+)' \(([^)]+)\)", text)
 counted = re.search(r'Loaded (\d+) plugins', text)

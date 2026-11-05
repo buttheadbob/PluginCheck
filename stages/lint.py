@@ -51,7 +51,7 @@ if 'magnetar' in target and target['magnetar'].get('project'):
     os.makedirs(libs, exist_ok=True)
     docker('create', '--name', name, MAGNETAR)
     docker('cp', f'{name}:/opt/magnetar/Libraries/MagnetarInterim/.', libs)
-    docker('rm', name)
+    docker('rm', '-v', name)
     args = ' '.join(ANALYZERS + ['-f net10.0', '-c Release', '-p:Dedicated64=/ds/DedicatedServer64', '-p:MagnetarBin=/work/libs', '-p:DeployToMagnetar=false'])
     builds['magnetar'] = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro',
                                 '--entrypoint', 'bash', SDK, '-c', f'cd /work/source; dotnet build "{target["magnetar"]["project"]}" {args} 2>&1')
@@ -138,7 +138,7 @@ if 'torch' in target and target['torch'].get('project'):
         os.makedirs(os.path.join(work, 'torch'), exist_ok=True)
         docker('create', '--name', name, TORCH)
         docker('cp', f'{name}:/opt/torch/.', os.path.join(work, 'torch'))
-        docker('rm', name)
+        docker('rm', '-v', name)
         torch_project(target['torch']['project'])
         args = ' '.join(ANALYZERS + ['-c Release'])
         builds['torch'] = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro',

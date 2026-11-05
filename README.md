@@ -28,8 +28,8 @@ UI. A local request counts as trusted, so no Steam sign-in is needed. The port i
 prints the command that removes it.
 
 Build these once, in order. The first takes about 15 minutes. It installs .NET Framework 4.8 with Wine, because that installer
-fails under Proton, and only its finished prefix is carried forward, so the images that run have no Wine in them. The hash is
-the one GitHub publishes for the Windows release:
+fails under Proton, and only its finished prefix is carried forward, so the images that run have no separate Wine install.
+The hash is the one GitHub publishes for the Windows release:
 
 ```bash
 docker build -t plugincheck-prefix:latest docker/prefix
@@ -85,7 +85,9 @@ Nothing is shared between systems, so an update or a layout change in one cannot
 | Torch | `plugincheck-ds-torch` volume | Per run |
 
 Test servers are private and send no telemetry: Torch analytics are off, Magnetar runs with `-consent deny`, and Quasar
-uploads nothing without an admin's consent. Failed test runs do not reach anyone's error reports.
+uploads nothing without an admin's consent. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
+library hits internal asserts under Legacy and would upload a crash dump for each. Failed test runs do not reach anyone's error
+reports.
 
 Tests are set up as a real server is: a Torch plugin's zip goes into Torch's own `Plugins` folder, and a loader compiles from
 its dev folder. Run data lives on Docker volumes. Mounted Windows folders only hand files in, partly because .NET under Wine,
@@ -133,3 +135,6 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
   needed.
 - **Torch needs a display, Legacy does not.** Torch uses WPF, and hangs at startup with no display even with `-nogui`, so only
   its image has Xvfb. Proton's launcher also needs `libvulkan` and its own graphics DLLs at startup, though nothing is drawn.
+
+## License
+[Unlicense](LICENSE).

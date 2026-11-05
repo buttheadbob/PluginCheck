@@ -93,7 +93,7 @@ def stop(container, label):
     logs = docker('logs', container)
     open(os.path.join(run_dir, f'quasar-managed-{label}.log'), 'w', encoding='utf-8').write(logs.stdout + logs.stderr)
     docker('stop', '-t', '60', container)
-    docker('rm', '-f', container)
+    docker('rm', '-f', '-v', container)
 
 
 def wait(container, ready, seconds=TIMEOUT):

@@ -162,7 +162,7 @@ output = docker('logs', container)
 open(log_path, 'w', encoding='utf-8').write(output.stdout + output.stderr)
 docker('stop', '-t', '60', container)
 docker('cp', f'{container}:/data/Magnetar/info.log', os.path.join(run_dir, 'legacy-info.log'))
-docker('rm', '-f', container)
+docker('rm', '-f', '-v', container)
 docker('volume', 'rm', volume)
 
 text = read(os.path.join(run_dir, 'legacy-info.log'))
