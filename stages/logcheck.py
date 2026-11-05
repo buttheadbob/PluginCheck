@@ -9,9 +9,9 @@ must read it: this stage finds the lines, and does not know which ones matter.
 """
 import collections, json, os, re, sys
 
-SKIP_DIRS = {'source', 'quasar-source', 'plugins', 'upstream', 'lint', 'threads', 'reflection', 'dependencies', 'regcheck', 'torch-plugins', 'Content', 'content', 'Mods', 'cache'}
-STAGE_LOGS = {'legacy', 'manifest', 'scan', 'policy', 'dependencies', 'inherited', 'magnetar', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'reflection',
-              'threads', 'nulls', 'similar', 'copies', 'hostpackages', 'lint', 'logcheck'}
+SKIP_DIRS = {'source', 'quasar-source', 'plugins', 'upstream', 'lint', 'threads', 'commands', 'reflection', 'dependencies', 'regcheck', 'torch-plugins', 'Content', 'content', 'Mods', 'cache'}
+STAGE_LOGS = {'behaviour', 'legacy', 'manifest', 'scan', 'policy', 'dependencies', 'inherited', 'magnetar', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'reflection',
+              'threads', 'commands', 'nulls', 'similar', 'copies', 'hostpackages', 'lint', 'logcheck'}
 PROBLEM = re.compile(r'\[(WARN|WARNING|ERROR|FATAL|CRITICAL)\]|\b(Exception|Unhandled|Traceback|NullReference|StackOverflow|OutOfMemory|deadlock|Assert|fatal error|crash)\w*\b|\bFailed to\b|\bCould not\b|\bUnable to\b|\berror:', re.I)
 TRACE = re.compile(r'^\s+at (.+?)(?:\(| in )')
 QUIET = re.compile(r'Hosting\.Diagnostics|EndpointMiddleware|LogicalHandler|ClientHandler')

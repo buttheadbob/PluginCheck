@@ -5,6 +5,9 @@ usage: similar.py <target.json> <run dir> [results.json]
 This stage only gathers. It writes similar-catalog.txt, one plugin per line, with this plugin's own details first. Whether
 two plugins overlap is a matter of meaning, so an AI reads the file and judges it. See REVIEW.md. It always ends as `review`.
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import githubtoken
 import io, json, os, re, sys, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 
@@ -21,7 +24,7 @@ repo = target['repo']
 
 
 def fetch(url):
-    return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'PluginCheck'}), timeout=60).read()
+    return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'PluginCheck', **githubtoken.headers(url)}), timeout=60).read()
 
 
 def tidy(text):

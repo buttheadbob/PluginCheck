@@ -1,0 +1,13 @@
+{
+  "name": "AutoStation",
+  "repo": "../AutoStation",
+  "magnetar": {
+    "manifest": "AutoStation.xml",
+    "project": "ServerPlugin/ServerPlugin.csproj"
+  },
+  "torch": {
+    "project": "TorchPlugin/AutoStation.csproj",
+    "zip": "Build/AutoStation.zip",
+    "guid": "e678cf63-204e-46f0-8111-626ecedf6cd2"
+  }
+}

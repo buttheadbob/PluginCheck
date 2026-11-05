@@ -34,6 +34,9 @@ read first. Similar code is not proof of wrongdoing, and low numbers are not pro
 a line comparison. A person must read the matches. Sources are cached in cache/sources: hub plugins by their pinned
 commit, which never changes, and others for a day. Pass --refresh to check.py to download again.
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import githubtoken
 import collections, concurrent.futures, hashlib, io, json, os, re, shutil, sys, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 
@@ -81,7 +84,7 @@ repo = target['repo']
 
 
 def get(url, limit=None):
-    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'PluginCheck'}), timeout=60) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'PluginCheck', **githubtoken.headers(url)}), timeout=60) as r:
         data = r.read(limit + 1 if limit else -1)
     if limit and len(data) > limit:
         raise ValueError('too large')

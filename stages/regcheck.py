@@ -28,10 +28,23 @@ def finish(status, **fields):
     sys.exit(0 if status == 'pass' else 1)
 
 
+def why_no_plugin():
+    """Why the magnetar stage left no plugin.dll to test, in its own words where it gave any."""
+    path = os.path.join(run_dir, 'magnetar.json')
+    if not os.path.exists(path):
+        return 'the magnetar stage did not run, and this stage tests the plugin it builds'
+    stage = json.load(open(path, encoding='utf-8'))
+    if stage['status'] == 'pass':
+        return 'the magnetar stage passed but left no plugin.dll in its DevFolder'
+    detail = stage.get('reason') or '; '.join(p['text'] for p in stage.get('problems', [])[:3])
+    return f"the magnetar stage ended as {stage['status']}, so there is no plugin.dll to test" + (f': {detail}' if detail else '')
+
+
 built = glob.glob(os.path.join(run_dir, 'data', 'Magnetar', 'DevFolder', '*', 'Bin', 'plugin.dll'))
 if not built:
-    print('no loader-built plugin.dll: the Magnetar stage did not compile the plugin')
-    finish('not run', reason='no loader-built plugin.dll')
+    reason = why_no_plugin()
+    print(reason)
+    finish('not run', reason=reason)
 
 os.makedirs(work, exist_ok=True)
 shutil.copytree(os.path.join(here, 'regcheck'), os.path.join(work, 'src'), dirs_exist_ok=True)

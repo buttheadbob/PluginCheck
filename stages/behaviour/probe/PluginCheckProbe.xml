@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<PluginData xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="GitHubPlugin">
+    <Id>6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b10</Id>
+    <RepoId>local/PluginCheckProbe</RepoId>
+    <FriendlyName>PluginCheckProbe</FriendlyName>
+    <Author>PluginCheck</Author>
+    <Tooltip>Records fixture grids for the behaviour stage</Tooltip>
+    <Description>A test instrument for PluginCheck. It is never published.</Description>
+    <SourceDirectories>
+        <Directory>src</Directory>
+    </SourceDirectories>
+    <Commit></Commit>
+</PluginData>

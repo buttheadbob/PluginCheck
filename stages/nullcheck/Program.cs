@@ -92,7 +92,9 @@ foreach (var tree in trees)
 }
 
 var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error
-    && d.Id != "CS1705" && d.Id != "CS1509" && !d.GetMessage().Contains("InitializeComponent")).ToList();
+    && d.Id != "CS1705" && d.Id != "CS1509" && !d.GetMessage().Contains("InitializeComponent")
+    // A control named in a XAML page, which this analysis does not compile. The lint stage does cover these.
+    && !(d.Id == "CS0103" && (d.Location.SourceTree?.FilePath.EndsWith(".xaml.cs", StringComparison.OrdinalIgnoreCase) ?? false))).ToList();
 var errorSample = errors.GroupBy(d => d.Id).OrderByDescending(g => g.Count()).Take(5).Select(g => $"{g.Count()} {g.Key}: {g.First().GetMessage()}").ToArray();
 Console.WriteLine(JsonSerializer.Serialize(new { files = sources.Length, uses = seenRoots, compileErrors = errors.Count, errorSample, findings = findings.Values }));
 

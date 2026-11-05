@@ -97,11 +97,11 @@ def torch_project(project):
             if not f.endswith('.xaml'):
                 continue
             text = open(os.path.join(d, f), encoding='utf-8-sig', errors='replace').read()
-            match = re.search(r'x:Class="([\w.]+)"', text)
+            match = re.search(r'x:Class\s*=\s*"([\w.]+)"', text)
             if not match:
                 continue
             ns, cls = match.group(1).rsplit('.', 1)
-            named = dict((n, t) for t, n in re.findall(r'<(\w+)\b[^<>]*?\s(?:x:)?Name="(\w+)"', text))
+            named = dict((n, t) for t, n in re.findall(r'<(\w+)\b[^<>]*?\s(?:x:)?Name\s*=\s*"(\w+)"', text))
             # Only Root style names on the page itself are left out: the base class already is that object.
             fields = ''.join(f'internal System.Windows.Controls.{t} {n} = null!; ' for n, t in sorted(named.items()) if t != 'UserControl')
             stubs.append(f'namespace {ns} {{ partial class {cls} {{ {fields}private void InitializeComponent() {{ }} }} }}')

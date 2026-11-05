@@ -10,9 +10,12 @@ on real Windows before calling it a plugin defect.
 Run data must live on a Docker volume. .NET under Wine, which Proton is built on, fails with BadImageFormatException loading a larger DLL from a Windows
 folder mounted through Docker Desktop, while the same file loads from a volume. So settings are seeded in, and logs copied out.
 """
-import json, os, re, shutil, subprocess, sys, time
+import datetime, glob, json, os, re, shutil, subprocess, sys, time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import githubtoken, startlog
 
 IMAGE = os.environ.get('PLUGINCHECK_LEGACY_IMAGE', 'plugincheck-magnetar-legacy:latest')
 TIMEOUT = 45 * 60
@@ -38,6 +41,7 @@ config = os.path.join(data, 'Magnetar')
 container = f'plugincheck-legacy-{int(time.time())}'
 volume = container + '-data'
 log_path = os.path.join(run_dir, 'legacy-container.log')
+game_log_path = os.path.join(run_dir, 'legacy-game.log')
 checks = []
 
 
@@ -125,10 +129,11 @@ write(os.path.join(data, 'Instance', 'SpaceEngineers-Dedicated.cfg'), f'''<?xml 
 </MyConfigDedicated>
 ''')
 
-subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS,
+token_args, token_env = githubtoken.for_container()
+subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS, *token_args,
                 '-v', 'plugincheck-ds-legacy:/ds', '-v', f'{volume}:/data', '-v', f'{data}:/seed:ro',
                 '-v', f'{os.path.join(base, "source")}:/plugin:ro', IMAGE],
-               check=True, stdout=subprocess.DEVNULL)
+               check=True, stdout=subprocess.DEVNULL, env=token_env)
 
 
 def read(path):
@@ -158,27 +163,53 @@ while time.time() - start < TIMEOUT:
     time.sleep(10)
 
 elapsed = int(time.time() - start)
+# Stop first, so the logs run to the end of the test and not just to the moment the wait began.
+docker('stop', '-t', '60', container)
 output = docker('logs', container)
 open(log_path, 'w', encoding='utf-8').write(output.stdout + output.stderr)
-docker('stop', '-t', '60', container)
 docker('cp', f'{container}:/data/Magnetar/info.log', os.path.join(run_dir, 'legacy-info.log'))
+# The game's own log is where a plugin's later lines land. docker cp cannot pick files by pattern, so take the folder.
+instance = os.path.join(base, 'instance')
+docker('cp', f'{container}:/data/Instance/.', instance)
+game_text = ''.join(read(f) for f in sorted(glob.glob(os.path.join(instance, '*.log'))))
+if game_text:
+    open(game_log_path, 'w', encoding='utf-8').write(game_text)
+shutil.rmtree(instance, ignore_errors=True)
 docker('rm', '-f', '-v', container)
 docker('volume', 'rm', volume)
 
-text = read(os.path.join(run_dir, 'legacy-info.log'))
-for kind, rule in FAILURES:
-    for line in text.splitlines():
-        if rule.search(line):
-            checks.append({'level': 'fail', 'kind': kind, 'text': line.strip()[:300]})
-registered = [(n, o) for n, o in re.findall(r'Registered (\d+) command module\(s\) from (.+)', text) if not o.startswith('Magnetar')]
-enabled = re.search(r'Enabled Plugins: (.*)', text)
-if not enabled or enabled.group(1).strip() == 'None':
-    checks.append({'level': 'fail', 'kind': 'plugin load', 'text': 'the plugin was not enabled, so nothing about it was tested'})
-elif not registered:
-    checks.append({'level': 'fail', 'kind': 'command registration', 'text': 'no command modules were registered by the plugin'})
 
-print(f'state={state} after {elapsed}s, registrations={registered}, problems={len(checks)}')
+def seconds_after_ready(log):
+    """How far a game log runs past Game ready, or None if it never got there."""
+    stamp = r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\.\d+ - '
+    stamps = re.findall(stamp, log, re.M)
+    ready = re.search(stamp + '.*' + READY, log, re.M)
+    if not ready:
+        return None
+    moment = datetime.datetime.fromisoformat
+    return int((moment(stamps[-1]) - moment(ready.group(1))).total_seconds())
+
+
+text = read(os.path.join(run_dir, 'legacy-info.log'))
+registered = [(n, o) for n, o in re.findall(r'Registered (\d+) command module\(s\) from (.+)', text) if not o.startswith('Magnetar')]
+stopped = startlog.loader_stopped(text)
+if not stopped:
+    for kind, rule in FAILURES:
+        for line in text.splitlines():
+            if rule.search(line):
+                checks.append({'level': 'fail', 'kind': kind, 'text': line.strip()[:300]})
+    problem = startlog.plugin_problem(text, registered, state)
+    if problem:
+        checks.append({'level': 'fail', 'kind': problem[0], 'text': problem[1]})
+
+after_ready = seconds_after_ready(game_text)
+print(f'state={state} after {elapsed}s, registrations={registered}, problems={len(checks)}, game log runs {after_ready}s past {READY}')
+if stopped:
+    print(stopped)
 for c in checks[:30]:
     print(f"{c['kind']}: {c['text']}")
-ok = state == 'loaded' and not checks
-finish('pass' if ok else 'fail', state=state, seconds=elapsed, registered=registered, problems=checks, note='Ran under Proton, not Windows')
+ok = state == 'loaded' and not checks and not stopped
+fields = {'state': state, 'seconds': elapsed, 'registered': registered, 'problems': checks, 'gameLogSecondsAfterReady': after_ready, 'note': 'Ran under Proton, not Windows'}
+if stopped:
+    finish('unable to verify', reason=stopped, **fields)
+finish('pass' if ok else 'fail', **fields)

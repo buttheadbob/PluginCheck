@@ -2,6 +2,7 @@
 
 Tests Space Engineers 1 plugins for Torch, Magnetar and Quasar in containers, so crashes and test data stay off the host.
 [REVIEW.md](REVIEW.md) tells an AI how to review a plugin, including security and legal checks, and how to use these tests.
+[Agent.md](Agent.md) holds the rules for the AI running it: read the code behind every lead, and give each one a verdict.
 
 ## Use it
 Needs Python 3.11+ and Docker Desktop on the WSL 2 backend. Clone this repository next to your plugin repositories.
@@ -20,7 +21,28 @@ python check.py SensEssentials --only manifest,scan
 python check.py SensEssentials --skip torch
 ```
 
-Results land in `runs/<target>/<timestamp>/`: `results.json`, plus a log for each stage. Worlds and source copies are
+Anything that can be checked without a running server goes first, side by side, and no server starts until all of those are done. A
+compile error from `lint` also skips every server stage and says why, since a plugin that does not compile cannot load. On a first run the
+stages that read the game's assemblies wait for a server stage instead, because that is what installs them.
+
+Work is only done once. Stages that only read files reuse their last answer when the plugin, the game and PluginCheck's own code are unchanged, and
+`behaviour` keeps each server's result by build, game, settings and tools, so a published build never needs its servers again and unchanged code needs
+none. A reused result is shown again, leads included, and marked as reused. `dependencies` always runs, because new advisories appear without a
+plugin changing. `--refresh` ignores kept results, the thread catalog and the downloaded source of other plugins.
+
+Stages run side by side unless one needs another's work, as `DEPENDS` in `check.py` lists. `behaviour` runs alone because it takes every
+core, and `logcheck` runs last because it reads every log. Each line of output is marked with its stage.
+
+A run reports as it goes. In a terminal, a colour panel stays at the top with the time left, every stage, each running server and the
+results so far, while details scroll underneath. Each stage's time comes from how long it took last time, and `behaviour` posts each
+finished server with an ETA, and each difference as soon as it is known. Without a terminal, or with `PLUGINCHECK_PLAIN=1`, the same lines
+print as plain text, with a heartbeat from any quiet stage.
+
+Always run it in a real terminal you can see, so the panel shows. Redirecting or piping the output, or starting it from a background task, turns the
+panel off with no warning. An AI running PluginCheck must do the same: [Agent.md](Agent.md) has the rule. To follow a run from outside, read
+`results.json` and the stage logs below.
+
+Results land in `runs/<target>/<timestamp>/`: `results.json`, updated after every stage, plus a log for each stage that can be followed live. Worlds and source copies are
 deleted afterwards. Add `--keep` to look at them.
 
 Add `--hold` to leave the Quasar-managed server running at http://127.0.0.1:18080 with no time limit, to look around its
@@ -50,6 +72,10 @@ docker build --build-arg MAGNETAR_SHA256=<sha256> -t plugincheck-magnetar-legacy
 Each stage ends as `pass`, `fail`, `review` (a person or AI must read it), `not run`, `not present` or `unable to verify`.
 A stage that did not run is never a pass.
 
+**GitHub limit:** without a token GitHub allows 60 requests an hour. To raise that, put a token in `github-token.txt` beside `check.py`, which
+git ignores. Use a fine-grained token with read access to public repositories and nothing else, because a container that uses it also runs
+plugin code. `PULSAR_GITHUB_TOKEN` works too.
+
 ## Stages
 | Stage | Runs in | Proves |
 |---|---|---|
@@ -60,18 +86,97 @@ A stage that did not run is never a pass.
 | `copies` | Host | Compares code with every plugin whose source can be reached, both ways, as NOTICE, WARN or EXTREME |
 | `dependencies` | .NET SDK image | Every package, from project files and hub manifests, against NuGet's security advisories |
 | `inherited` | Host | How much code came from upstream, as a range. Ignores position and counts near matches |
-| `magnetar` | Official Magnetar image | The loader compiles the plugin from source and a world loads |
-| `legacy` | Our Proton image | The same test on MagnetarLegacy and .NET Framework 4.8 |
-| `regcheck` | .NET SDK image | Every command module registers on its own, using the plugin the loader built |
+| `lint` | .NET SDK and Quasar images | .NET analyzer warnings, from a real build |
+| `reflection` | .NET SDK image | Literal reflection lookups find a real game member with those flags. Others are listed to trace by hand |
+| `threads` | .NET SDK image | Lists game objects used off the game thread, following calls through the plugin, and every call to a game member that behaves differently by thread. Leads to read. Always `review`, because no leads proves nothing |
+| `commands` | .NET SDK image | Warns when player-level commands can show data about other players: game data, grids, or a plugin's own records. Some are intended, so it never fails |
+| `nulls` | .NET SDK image | Lists game values that can be null, used with no check first. Leads to read |
+| `hostpackages` | Host and images | The plugin ships nothing the game or its loader already provides |
+| `magnetar` | Official Magnetar image | The loader compiles the plugin from source and a world loads. If Magnetar itself cannot start, such as on GitHub's rate limit, it ends as `unable to verify` and says why |
+| `legacy` | Our Proton image | The same test on MagnetarLegacy and .NET Framework 4.8. Logs are copied after the server stops, and the game's own log lands in `legacy-game.log` |
+| `regcheck` | .NET SDK image | Every command module registers on its own, using the plugin the loader built. If it has no plugin to test, it says why `magnetar` left none |
 | `quasar` | Official Quasar images | The UI plugin builds against each Quasar version and really loads |
 | `quasar_managed` | Official Quasar image | Quasar starts a server with the plugin and companion, as a real install does |
 | `torch` | Our Proton image | Torch loads the zip and lists every command it registers |
-| `reflection` | .NET SDK image | Literal reflection lookups find a real game member with those flags. Others are listed to trace by hand |
-| `threads` | .NET SDK image | Lists game objects used off the game thread, following calls through the plugin. Leads to read |
-| `nulls` | .NET SDK image | Lists game values that can be null, used with no check first. Leads to read |
-| `hostpackages` | Host and images | The plugin ships nothing the game or its loader already provides |
-| `lint` | .NET SDK and Quasar images | .NET analyzer warnings, from a real build |
+| `behaviour` | Official Magnetar image and our Proton image | Runs each command and setting on real servers, and compares every build, including the published one. Always `review` |
 | `logcheck` | Host | Reads every log from the run. A stack trace through plugin code fails it |
+
+## Thread-sensitive members
+Some game members give a different answer depending on who calls them. `MyCubeGrid.BigOwners` gives a subgrid with no owned
+blocks its parent's owners on the game thread, and an empty list anywhere else. Moving such a line between threads changes what a
+plugin does, with no error and no failed stage. So `threads` lists every plugin call to one of these members, on any thread, with
+what it depends on and how it got there.
+
+`stages/threadcatalog` writes the list from the game's own IL, and nothing in it is written by hand:
+
+- **Seeds** are methods that compare the calling thread with the game's update thread, read `MyEntities.IsAsyncUpdateInProgress`, or
+  read a `[ThreadStatic]` field that holds state. A field that only ever gets a new object or null is a scratch buffer, and does not count.
+- **Callers** are then followed, because `GetOwnerLogoutTimeSeconds` changes with the thread too, though it only reads `BigOwners`.
+  A value is followed 4 calls up. A side effect is followed 1, since nearly everything in the game plays a sound somewhere.
+- **Interface and base members** count too, so a call through `IMyCubeGrid.BigOwners` is found.
+
+Regenerating is automatic. The catalog lives in `cache/threadcatalog/<game build>.json`, keyed by a hash of the game's assemblies and its generator, so
+the first run after a game update writes a new one and prints what changed since the last catalog. `--refresh` forces it.
+
+Each entry in `threads.json` under `threadSensitive` says:
+
+| Field | Meaning |
+|---|---|
+| `dependsOnCaller` | `result` if what comes back differs, `effect` if what it does differs |
+| `context` | `background` if a background walk reached it, `handed to the game thread` if inside an invoke, or `not traced` |
+| `seed`, `via` | What the game checks, and the chain of calls from the plugin's member to that check |
+
+`not traced` means no background path was found. It does not mean the game thread. Limits of the catalog: it does not see thread
+checks through `ManagedThreadId` fields or `ThreadLocal<T>`, the depth limits leave out distant callers, and delegates the game calls
+later are not followed. A member that is not listed may still depend on the thread.
+
+`MyEntities.GetEntityById` shows why thread-static fields count. World load can leave entities in the game thread's `[ThreadStatic]`
+list in `MyEntityIdentifier`, so another thread gets null for an entity that exists. Measured on Magnetar Interim.
+
+## Behaviour
+Loading proves little: a plugin can change which grids it acts on, with every other stage still passing. `behaviour` runs what a
+plugin does and records the result. It needs nothing written by a person, and runs by default with no limit on server starts.
+
+1. **Discovers:** a probe plugin loads beside the plugin and reads its commands and settings, on Magnetar and on Torch.
+2. **Generates:** one idle run, then every command, on its own and with each on/off setting its code can reach flipped. Required
+   arguments are filled in by type, and a command with optional on/off arguments also runs with them on.
+3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
+   probe has its record.
+4. **Compares:** the published build against each working build, and the working builds against each other.
+
+Published builds come from the repositories listed on MagnetarHub and QuasarHub, and from torchapi.com, into `cache/behaviour`. A plugin
+on none of them is new, so it has no baseline. Comparisons cross platforms on purpose. A port should behave like what it came from, so a
+difference between a Torch and a Magnetar build is worth reading, and matching behaviour can support a finding that a plugin was ported
+without credit. A difference across platforms can also come from the host, such as Proton or timing, so read it against the code.
+
+The AI running PluginCheck reads each command's code and records what it reads and writes, as [Agent.md](Agent.md) says. Commands share a server
+unless they overlap, meaning one writes something another reads or writes, so changing the world is no reason to run alone. Only scenarios with
+the same settings can share one. Writers go first, so the first command in each server starts clean. A later command that shows a difference, or any
+command that changes something it does not declare, reruns alone before it is reported. The same reading says which settings each command can
+reach. With no current reading, every command gets its own server and every setting is flipped.
+
+Servers run side by side, as many as fit in Docker's cores and memory, each pinned to its own 2 logical cores. Measured on AutoStation, 16 servers
+on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
+
+The world is generated by `stages/behaviour/fixture.py` from the game's own saves: grids of each size and kind of owner, subgrids on
+rotors, wheels, landing gear and connectors, and a moon for gravity. Every build runs at least twice, and a result that differs between runs of one build
+is marked `UNSTABLE`, with the builds it happened on, because it depends on timing. `PLUGINCHECK_REPEATS` sets how many runs each build gets.
+
+The probe records on the game thread, the only place the game gives the full answer. Results land in `behaviour.json`, with every
+record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+
+**What it cannot prove:**
+- **Correctness.** No difference only means the builds agree, and both may be wrong.
+- **That there are no races.** A race depends on timing, and a short run on a small world rarely hits one.
+- **Anything needing a real player.** There is no game client, so online player checks stay untested.
+- **That it reached the logic.** A plugin that only reacts to players or chat may do nothing here. `noChange` lists scenarios that left
+  the world unchanged. These are never reported as correct.
+- **A new plugin's regressions.** With no baseline, its first review rests on reading the code.
+- **Scale, long runs, or other plugins.** A run lasts minutes on a small world, with only this plugin and the probe loaded.
+- **Commands that need particular arguments.** Generated values may be refused. Replies are in the record, so read them, and read the
+  command's code.
+- **Settings that work together.** On/off settings flip one at a time, and other kinds of setting are not changed.
+- **Legacy.** Only Magnetar Interim and Torch run this stage.
 
 ## Isolation
 Nothing is shared between systems, so an update or a layout change in one cannot affect another:
@@ -106,10 +211,34 @@ docker run --rm -u 0 --entrypoint chown -v plugincheck-ds-torch:/ds plugincheck-
 docker run --rm -u 0 --entrypoint chown -v plugincheck-ds-legacy:/ds plugincheck-proton:latest -R server:server /ds
 ```
 
-Containers have CPU and memory limits. Each plugin's source is copied into the run folder, so a test never writes to the
+`behaviour` starts its servers from the Magnetar and Torch volumes with updates off, and each server has its own data volume.
+
+Containers have CPU and memory limits, and each `behaviour` server is pinned to its own cores. Each plugin's source is copied into the run folder, so a test never writes to the
 plugin's repository. Everything Docker creates has a `plugincheck` name.
 
 Containers are not a hard security boundary. Do not run a plugin you would not trust on a test machine.
+
+## What it keeps
+`cache/` is ignored by git, and deleting any of it only costs time.
+
+| Folder | Holds |
+|---|---|
+| `cache/stages/<target>` | The last answer of each stage that only reads files, by a hash of what it read |
+| `cache/threadcatalog` | Thread-sensitive members, by game build |
+| `cache/behaviour` | Published builds, each server's result in `results`, and the AI's reading of the commands in `commands-<target>.json` |
+| `cache/magnetar-github` | What Magnetar downloads from GitHub, by game build |
+| `cache/sources` | The source of other plugins, for `copies` |
+
+## Environment variables
+| Variable | Effect |
+|---|---|
+| `PLUGINCHECK_PLAIN=1` | Plain lines instead of the panel |
+| `PLUGINCHECK_REPEATS` | Runs of each build in `behaviour`. The default is 2, which is also the least |
+| `PLUGINCHECK_BEHAVIOUR_WORKERS` | Servers at a time. The default is as many as fit |
+| `PLUGINCHECK_BEHAVIOUR_CORES` | Logical cores per server. The default is 2 |
+| `PLUGINCHECK_BEHAVIOUR_ONLY` | Only scenarios containing this text, for working on the stage |
+| `PLUGINCHECK_TORCH_IMAGE`, `PLUGINCHECK_LEGACY_IMAGE` | Use a different image |
+| `PULSAR_GITHUB_TOKEN` | A GitHub token, in place of `github-token.txt` |
 
 ## Add a plugin
 Add `targets/<name>.json`. Leave out the sections the plugin does not have:
@@ -128,8 +257,15 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
 - **Quasar 1.4.1.1 image:** `release.json` says `1.4.1-1` while the program reports `1.4.1.1`, so it cannot write the
   migration receipt that Quasar 1.5 requires, and a fresh 1.5 container cannot start. The `quasar` stage corrects that
   one field for the 1.4.1.1 step, so Quasar's own code writes the real receipt. Results record `releaseJsonWorkaround`.
-- **Commands are proven to register, not to work.** Magnetar has no console, and `!help` only runs from in-game chat.
-  Torch's log lists every command it registers, which is the same list `!longhelp` draws on.
+- **GitHub's limit stops Magnetar.** Magnetar fetches its core plugins from GitHub, 60 requests an hour without a token. When it runs out,
+  `magnetar` and `legacy` end as `unable to verify` with the time it resets, and `regcheck` as `not run`. Run them again after that.
+  `behaviour` waits for the reset by itself. A token avoids this, and `cache/magnetar-github` keeps each game build's downloads, so later
+  runs ask for less.
+- **Magnetar's downloads can time out.** GitHub can take 9 to 14 seconds to answer for the LinuxCompat release files, and Pulsar gives
+  up. `magnetar` and `legacy` end as `unable to verify`. `behaviour` tries a server 3 times, then reports it as `FAILED`, or lists the
+  build in `buildsLeftOut`.
+- **Load stages prove commands register, not that they work.** Magnetar has no console, and `!help` only runs from in-game chat. `behaviour`
+  runs each command through the probe, within the limits under [Behaviour](#behaviour).
 - **Torch and Legacy run under Proton.** Proton is not Windows, so a failure is a lead. Confirm it on Windows before calling it
   a plugin defect. `steamcmd`'s Linux `steamclient.so` is linked in for Proton's Steam bridge, so no Steam client or sign-in is
   needed.

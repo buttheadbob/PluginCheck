@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<PluginManifest xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Name>PluginCheckProbe</Name>
+  <Guid>6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b11</Guid>
+  <Repository>None</Repository>
+  <Version>v1.0.0</Version>
+  <Dependencies />
+</PluginManifest>

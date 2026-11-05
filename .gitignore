@@ -1,7 +1,9 @@
 # Test output: logs, worlds and copies of plugin source
 runs/
-# Downloaded source of other plugins, for the copies stage
+# Downloads, kept results and the AI's reading of commands. See README.md
 cache/
 __pycache__/
+# A GitHub token. See stages/githubtoken.py
+github-token.txt
 bin/
 obj/
