@@ -56,7 +56,9 @@ for folder, dirs, files in os.walk(target['repo']):
         for m in HARMONY.finditer(text):
             line = text.count('\n', 0, m.start()) + 1
             matched.add(line)
-            lookups.append({'file': rel, 'line': line, 'type': m.group(1), 'kind': 'Method', 'member': m.group(2), 'flags': []})
+            # Harmony searches every member of the type, so a private method needs no flags here, unlike Type.GetMethod.
+            lookups.append({'file': rel, 'line': line, 'type': m.group(1), 'kind': 'Method', 'member': m.group(2),
+                            'flags': ['Public', 'NonPublic', 'Static', 'Instance']})
         for m in ANY.finditer(text):
             line = text.count('\n', 0, m.start()) + 1
             if line not in matched:

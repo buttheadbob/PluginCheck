@@ -53,10 +53,12 @@ shutil.copy(built[0], os.path.join(work, 'plugin.dll'))
 name = f'plugincheck-sdkcopy-{os.getpid()}'
 docker('create', '--name', name, MAGNETAR)
 copied = docker('cp', f'{name}:/opt/magnetar/Libraries/MagnetarInterim/PluginSdk.dll', os.path.join(work, 'PluginSdk.dll'))
+# Reading a type's attributes loads every attribute on it, and a [HarmonyPatch] class needs Harmony for that. The host provides it to a plugin.
+harmony = docker('cp', f'{name}:/opt/magnetar/Libraries/MagnetarInterim/0Harmony.dll', os.path.join(work, '0Harmony.dll'))
 docker('rm', '-v', name)
-if copied.returncode:
-    print(copied.stderr)
-    finish('not run', reason='could not copy PluginSdk.dll from the Magnetar image')
+if copied.returncode or harmony.returncode:
+    print(copied.stderr + harmony.stderr)
+    finish('not run', reason='could not copy PluginSdk.dll and 0Harmony.dll from the Magnetar image')
 
 command = ('set -e; cd /work/src; '
            'dotnet build -c Release -v q -nologo -o /work/out -p:PluginSdkPath=/work/PluginSdk.dll >/work/build.log 2>&1; '

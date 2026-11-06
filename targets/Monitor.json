@@ -1,0 +1,76 @@
+{
+  "name": "Monitor",
+  "repo": "../Monitor",
+  "magnetar": {
+    "manifest": "Monitor.xml",
+    "project": "src/SenX.Monitor.Magnetar/SenX.Monitor.Magnetar.csproj"
+  },
+  "quasar": {
+    "manifest": "quasar-hub.xml",
+    "project": "src/SenX.Monitor.Quasar/SenX.Monitor.Quasar.csproj",
+    "packageManifest": "quasar-plugin.json"
+  },
+  "torch": {
+    "project": "src/SenX.Monitor.Torch/SenX.Monitor.Torch.csproj",
+    "zip": "artifacts/torch/Monitor.zip",
+    "guid": "f58cf508-46b1-4964-9836-fd42429adbe0"
+  },
+  "behaviour": {
+    "legacy": true,
+    "settleSeconds": 70,
+    "removeDuring": {
+      "commands": [
+        "!monitor diagnose",
+        "!monitor grids",
+        "!monitor players",
+        "!monitor factions",
+        "!monitor blocks",
+        "!monitor physics",
+        "!monitor scripts"
+      ],
+      "minSeconds": 20,
+      "remove": [
+        {
+          "after": 2,
+          "kind": "grid",
+          "name": "player-large"
+        },
+        {
+          "after": 3,
+          "kind": "block",
+          "name": "connector-parent"
+        },
+        {
+          "after": 4,
+          "kind": "grid",
+          "name": "rotor-sub-owned"
+        },
+        {
+          "after": 5,
+          "kind": "identity",
+          "name": "FixtureRecent"
+        },
+        {
+          "after": 6,
+          "kind": "faction",
+          "name": "SPRT"
+        },
+        {
+          "after": 7,
+          "kind": "player",
+          "name": "ProbePlayer"
+        },
+        {
+          "after": 9,
+          "kind": "grid",
+          "name": "rotor-parent"
+        },
+        {
+          "after": 11,
+          "kind": "grid",
+          "name": "gear-parent"
+        }
+      ]
+    }
+  }
+}

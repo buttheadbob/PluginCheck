@@ -106,8 +106,9 @@ def batches(plans, known):
         groups.setdefault(tuple(sorted(plan.get('settings', {}).items())), []).append(plan)
     out = []
     for group in groups.values():
-        out += [[p] for p in group if not p.get('command')]
-        commands = [p for p in group if p.get('command')]
+        # So does a scenario that removes things, because that would reach anything sharing its server.
+        out += [[p] for p in group if not p.get('command') or p.get('removals')]
+        commands = [p for p in group if p.get('command') and not p.get('removals')]
         commands.sort(key=lambda p: not footprint(p['command'], known)[1])
         shared = []
         for plan in commands:

@@ -3,8 +3,12 @@
 Instructions for an AI reviewing a Space Engineers 1 plugin for Torch, Magnetar or Quasar. Follow it from top to bottom.
 The goal is to find what a hub reviewer would find, before the plugin is submitted.
 
-If the `se-dev-plugin-review` skill is installed and you are reviewing a hub PR, use that skill for the PR itself. It
-derives the exact commits from the hub manifest. This guide adds the automated tests and the legal review.
+Before any review, even with no hub PR yet, read `ReviewPolicy.md` and `ReviewPaths.md` from the `se-dev-plugin-review` skill, and apply them.
+They hold the rules hub reviewers use. If the skill is not installed, report that as `not run`. [Agent.md](Agent.md) lists the other skills to use
+and how to set them up.
+
+If you are reviewing a hub PR, use that skill for the PR itself. It derives the exact commits from the hub manifest. This guide adds the automated
+tests and the legal review.
 
 ## Ground rules
 
@@ -41,6 +45,8 @@ Record before reading anything else:
 4. What each loader compiles. The manifest decides, not the project file. See [Loader facts](#loader-facts).
 
 ## Step 2: Run the automated checks
+
+Get ready first, as [Agent.md](Agent.md) says under "Get ready before a full run", since a full run can take hundreds of servers.
 
 Classify the plugin's commands first, because that decides what shares a server and which settings get flipped. [Agent.md](Agent.md) has the steps.
 
@@ -357,7 +363,7 @@ Found in real reviews. Check for these every time:
 
 Write the report in this order. Keep it short, state each fact once, and leave out taste-only comments.
 
-1. **Scope:** repository, commit, review type, and file count.
+1. **Scope:** repository, commit, review type, file count, and the skills you used. Mark any skill the work needed and you could not use as `not run`.
 2. **Summary:** blockers and material risks in a few lines.
 3. **Findings**, most severe first:
    - Severity: `Blocking`, `High`, `Medium`, `Low` or `Note`, with the reason.

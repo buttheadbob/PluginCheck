@@ -39,7 +39,8 @@ import classification, fixture, githubtoken, startlog
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
-VOLUMES = {'magnetar': 'plugincheck-ds-magnetar', 'torch': 'plugincheck-ds-torch'}
+LEGACY = os.environ.get('PLUGINCHECK_LEGACY_IMAGE', 'plugincheck-magnetar-legacy:latest')
+VOLUMES = {'magnetar': 'plugincheck-ds-magnetar', 'legacy': 'plugincheck-ds-legacy', 'torch': 'plugincheck-ds-torch'}
 HUBS = {'MagnetarHub': 'https://codeload.github.com/CometWorks/magnetar-hub/zip/refs/heads/main',
         'QuasarHub': 'https://codeload.github.com/CometWorks/quasar-hub/zip/refs/heads/main'}
 TORCH_LIST = 'https://torchapi.com/api/plugins'
@@ -66,6 +67,11 @@ cache = os.path.normpath(os.path.join(here, '..', 'cache', 'behaviour'))
 counter = itertools.count(1)
 magnetar_cache_lock = threading.Lock()
 magnetar_cache = None
+
+
+# What a target asks of this stage, all of it optional: legacy (run on MagnetarLegacy too), settleSeconds (wait this long after the
+# world is ready, for a plugin with a warm-up) and removeDuring (commands to run again with things taken out of the world part way through).
+options = target.get('behaviour', {})
 
 
 def docker(*args):
@@ -173,10 +179,16 @@ def working_builds():
             shutil.copytree(os.path.join(repo, d.text.strip()), os.path.join(source, d.text.strip()), ignore=skip, dirs_exist_ok=True)
         builds.append({'name': 'working-magnetar', 'host': 'magnetar', 'source': source, 'manifest': os.path.basename(manifest),
                        'id': root.findtext('Id').strip(), 'plugin': root.findtext('FriendlyName').strip(), 'published': False})
+        # .NET Framework runs a plugin differently, so a target that says so gets its scenarios there too.
+        if options.get('legacy') and docker('image', 'inspect', LEGACY).returncode == 0:
+            builds.append({**builds[-1], 'name': 'working-legacy', 'host': 'legacy'})
     if 'torch' in target:
         path = os.path.join(repo, target['torch']['zip'])
         if os.path.exists(path):
-            builds.append({'name': 'working-torch', 'host': 'torch', 'zip': path, 'id': target['torch']['guid'], 'plugin': target['name'], 'published': False})
+            # The name Torch loads it under, from the zip's own manifest. A target's name is a label, and can hold no spaces.
+            with zipfile.ZipFile(path) as package:
+                plugin = ET.fromstring(package.read('manifest.xml')).findtext('Name').strip()
+            builds.append({'name': 'working-torch', 'host': 'torch', 'zip': path, 'id': target['torch']['guid'], 'plugin': plugin, 'published': False})
     return builds
 
 
@@ -254,6 +266,10 @@ def published_builds():
 def scenario_file(build, batch):
     lines = [f'plugin={build["plugin"]}', f'mode={batch[0].get("mode", "run")}']
     lines += [f'set:{k}={v}' for k, v in batch[0].get('settings', {}).items()]
+    if options.get('settleSeconds') and batch[0].get('mode') != 'discover':
+        lines.append(f"settle={options['settleSeconds']}")
+    for step, plan in enumerate(batch):
+        lines += [f"remove={step}|{r['after']}|{r['kind']}|{r['name']}" for r in plan.get('removals', [])]
     for plan in batch:
         # A command read as changing nothing has nothing to wait for.
         minimum, quiet = (2, 3) if plan.get('readonly') else (plan.get('min', 10), 10)
@@ -282,11 +298,13 @@ def dedicated_config(world_path):
 
 
 def seed_magnetar(build, seed, folder):
+    legacy = build['host'] == 'legacy'
+    root = 'Z:\\plugin\\' if legacy else '/plugin/'
     probe_folder = os.path.join(folder, 'source', PROBE)
     shutil.copytree(os.path.join(here, 'behaviour', 'probe'), probe_folder)
     name = build['plugin']
     shutil.copytree(build['source'], os.path.join(folder, 'source', name), ignore=shutil.ignore_patterns('.git', 'bin', 'obj'))
-    if magnetar_cache:
+    if magnetar_cache and not legacy:
         shutil.copytree(magnetar_cache, os.path.join(seed, 'Magnetar'), dirs_exist_ok=True)
     plugins = [(build['id'], name, build['manifest']), (PROBE_ID, PROBE, PROBE + '.xml')]
     dev = ''.join(f'    <LocalFolderConfig>\n      <Id>{escape(i)}</Id>\n      <DebugBuild>false</DebugBuild>\n    </LocalFolderConfig>\n' for i, _, _ in plugins)
@@ -300,7 +318,7 @@ def seed_magnetar(build, seed, folder):
   <Mods />
 </Profile>
 ''')
-    local = ''.join(f'    <LocalPlugin>\n      <Name>{escape(n)}</Name>\n      <Folder>/plugin/{escape(n)}</Folder>\n      <File>{escape(m)}</File>\n      <Enabled>true</Enabled>\n    </LocalPlugin>\n'
+    local = ''.join(f'    <LocalPlugin>\n      <Name>{escape(n)}</Name>\n      <Folder>{root}{escape(n)}</Folder>\n      <File>{escape(m)}</File>\n      <Enabled>true</Enabled>\n    </LocalPlugin>\n'
                     for _, n, m in plugins)
     write(os.path.join(seed, 'Magnetar', 'Sources', 'sources.xml'), f'''<?xml version="1.0"?>
 <SourcesConfig xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
@@ -319,17 +337,24 @@ def seed_magnetar(build, seed, folder):
 {local}  </LocalPluginSources>
 </SourcesConfig>
 ''')
-    write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('/data/Instance/Saves/Fixture'))
+    write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('Z:\\data\\Instance\\Saves\\Fixture' if legacy else '/data/Instance/Saves/Fixture'))
 
 
 def start_magnetar(build, seed, folder, container, volume, cores):
-    # With Magnetar's downloads cached these servers ask GitHub for little, so a token stays out of them unless it is needed.
-    token_args, token_env = ([], None) if magnetar_cache else githubtoken.for_container()
+    # Even with Magnetar's downloads cached, each server still asks GitHub for a little, and a run of many servers uses up the anonymous limit.
+    token_args, token_env = githubtoken.for_container()
     subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
                     '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour',
                     '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
                     '-v', f'{os.path.join(folder, "source")}:/plugin:ro', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint -consent deny'],
                    check=True, stdout=subprocess.DEVNULL, env=token_env)
+
+
+def start_legacy(seed, folder, container, volume, cores):
+    token_args, token_env = githubtoken.for_container()
+    subprocess.run(['docker', 'run', '-d', '--name', container, '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m',
+                    '--add-host', NO_CRASH_REPORTS, *token_args, '-v', f'{VOLUMES["legacy"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
+                    '-v', f'{os.path.join(folder, "source")}:/plugin:ro', LEGACY], check=True, stdout=subprocess.DEVNULL, env=token_env)
 
 
 def seed_torch(build, seed, folder, probe_zip):
@@ -381,10 +406,13 @@ def serve(build, batch, save, probe_zip, cores):
     write(os.path.join(seed, 'Instance', 'probe-scenario.txt'), scenario_file(build, batch))
     container = f'plugincheck-behaviour-{os.getpid()}-{number}'
     volume = container + '-data'
-    magnetar = build['host'] == 'magnetar'
+    magnetar = build['host'] in ('magnetar', 'legacy')
     if magnetar:
         seed_magnetar(build, seed, folder)
-        start_magnetar(build, seed, folder, container, volume, cores)
+        if build['host'] == 'legacy':
+            start_legacy(seed, folder, container, volume, cores)
+        else:
+            start_magnetar(build, seed, folder, container, volume, cores)
         instance, info = '/data/Instance', '/data/Magnetar/info.log'
     else:
         seed_torch(build, seed, folder, probe_zip)
@@ -423,7 +451,8 @@ def serve(build, batch, save, probe_zip, cores):
     log = read_text(os.path.join(folder, 'magnetar', 'info.log'))
     blocked = startlog.loader_stopped(log) if magnetar else None
     if magnetar:
-        remember_magnetar_cache(folder)
+        if build['host'] == 'magnetar':
+            remember_magnetar_cache(folder)
         shutil.rmtree(os.path.join(folder, 'magnetar', 'DevFolder'), ignore_errors=True)
         shutil.rmtree(os.path.join(folder, 'magnetar', 'GitHub'), ignore_errors=True)
     text = log + read_text(os.path.join(folder, 'container.log')) + ''.join(read_text(p) for p in glob.glob(os.path.join(folder, 'logs', '*.log')))
@@ -486,7 +515,7 @@ REPEATS = max(2, int(os.environ.get('PLUGINCHECK_REPEATS', '2')))
 def job_key(build, batch, repeat):
     """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
     parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
-             [[p.get('command'), p.get('settings'), p.get('min')] for p in batch]]
+             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals')] for p in batch], options.get('settleSeconds')]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -567,6 +596,9 @@ def generate(discovered, relevant):
             if setting['type'] == 'Boolean':
                 settings.setdefault(setting['name'], str(setting['default'].lower() != 'true').lower())
     plans = [{'name': 'idle', 'min': IDLE_SECONDS}]
+    removing = options.get('removeDuring', {})
+    plans += [{'name': f'{line} while removing', 'command': line, 'min': removing.get('minSeconds', 10), 'removals': removing['remove']}
+              for line in removing.get('commands', [])]
     for key, line in sorted(commands.items()):
         plans.append({'name': key, 'command': line})
         reads = relevant.get(classification.best_match(line, relevant))
@@ -603,9 +635,8 @@ def differences(first, second):
 
 
 def touched(record):
-    """Real changes to the world. Which grid of a docked pair is the parent can move on its own, and where a grid is and how fast it goes are
-    recorded to explain a result, not compared, so none of those count."""
-    return {k: v for k, v in changes(record).items() if k[1] not in ('parent', 'connection', 'position', 'speed')}
+    """Real changes to the world. Which grid of a docked pair is the parent can move on its own, so that does not count."""
+    return {k: v for k, v in changes(record).items() if k[1] not in ('parent', 'connection')}
 
 
 def undeclared(record, known):
@@ -689,6 +720,11 @@ for name, reason in broken.items():
 usable = [b for b in builds if b['name'] not in broken]
 if not usable:
     finish('unable to verify' if blocked else 'fail', reason=(blocked or list(broken.values()))[0][:500], discovered=discovered)
+# A working build left out can't be compared, so the servers a run would start are wasted. A published build left out only narrows the comparison.
+working_broken = [b['name'] for b in builds if not b['published'] and b['name'] in broken]
+if working_broken:
+    finish('not run', reason=f"{', '.join(working_broken)} could not be discovered, so nothing was run: {str(broken[working_broken[0]])[:400]}",
+           discovered=discovered, buildsLeftOut=broken)
 
 plans = generate({n: r for n, r in discovered.items() if n not in broken}, classification.settings_read(target['name'], repo))
 print(f"{len(plans)} scenarios from {sum(len(r.get('commands', [])) for r in discovered.values())} commands and "
@@ -777,7 +813,7 @@ def take(build, repeat, results):
             failure = {'build': build['name'], 'scenario': name, 'reason': str(record.get('failed') or record.get('blocked') or record.get('state'))[:400]}
             failures.append(failure)
             print(f"FAILED  {failure['build']}  {failure['scenario']}: {failure['reason'][:200]}", flush=True)
-        elif known and undeclared(record, known):
+        elif known and not by_name[name].get('removals') and undeclared(record, known):
             wrongly_classified[name] = undeclared(record, known)
             print(f"FAILED  {name} changed {', '.join(wrongly_classified[name])}, which its classification does not list. It reruns alone, and the reading is wrong.", flush=True)
         waiting[name] -= 1

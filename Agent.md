@@ -16,6 +16,21 @@ because it is how the user watches a run. `stages/display.py` only draws it on a
 3. Follow the run from its files, not its output. `runs/<target>/<timestamp>/results.json` is updated after every stage, and each stage's log
    can be followed live, so nothing needs capturing.
 
+## Get ready before a full run
+
+A `behaviour` run can take hundreds of servers, so make sure it will work before starting one.
+
+1. Finish the target first. Include every section the plugin has, and read its manifests to check that names and paths match.
+2. A plugin that adds settings to Quasar needs `quasar_managed`, so check that it will run before the first full run. If a stage shows
+   `not present`, find out why instead of calling it a gap.
+3. Run the cheap stages first: `python check.py <target> --only manifest,policy,reflection,lint,magnetar,regcheck,torch`. Fix what they find, then
+   run everything.
+4. `behaviour` stops by itself as `not run` if a working build can't be discovered, because the rest of the run couldn't compare it. Fix the reason
+   it gives, then run it again. A published build left out doesn't stop the run, it only narrows the comparison.
+5. Changing `behaviour.py`, the fixture or the probes throws away every saved server result. Make those changes before a run, not between runs,
+   and only when the user agrees.
+6. Changing a plugin's source also needs a new command classification. Otherwise every command gets its own server and every setting is flipped.
+
 ## Classify commands before a run
 
 What a command touches is a judgement about its code, so it is yours to make. `behaviour` uses it to decide what shares a server.
@@ -40,9 +55,35 @@ A command that changes something it does not declare fails loudly, and reruns al
    code you can read. Read it, then say what it does.
 3. **Never pass on a label or description as evidence.** A command's description, a method's name or a stage's message is a claim. Read
    what the code does.
-4. **Read the game's code for game behaviour.** Use the decompiled game and the `se-dev-game-code` skill. If the code does not settle it,
-   measure it in a container.
+4. **Read the game's code for game behaviour.** Use the skill that matches where the plugin runs, from the table below. If the code does not
+   settle it, measure it in a container.
 5. **Never hand the user a list of leads to sort out.** The user gets your conclusions.
+
+## Use the se-dev skills
+
+No stage loads a skill, so using them is your job. Load the ones that fit the plugin before you read its code, and list the ones you used in your
+report. Server and client code differ, so do not answer a server question from client code.
+
+Being installed is not the same as being usable. Before you rely on a skill:
+
+1. If its folder has a `Prepare.bat`, it needs setup once, and `Prepare.DONE` shows it is done. From PowerShell, run `.\Prepare.bat` in the skill's
+   folder, in the background. Setup can take several minutes. For `se-dev-server-code`, set `SE_SERVER_ROOT` first if it cannot find the server.
+2. Setup commits to the skill's own local repository, so it can fail with `gpg failed to sign the data` while signing is still starting. That is a
+   timing problem. Run it again, and do not change any git setting.
+3. `se-dev-plugin-review`'s preparation and posting scripts need Python 3.11+, `git` and a signed-in `gh`. If one is missing, report that as the
+   blocker. Its `ReviewPolicy.md` and `ReviewPaths.md` need none of these, so read them anyway.
+
+A skill you could not install or set up is `not run`, so say which one and why.
+
+| Work | Skills |
+|---|---|
+| Every review, even with no hub PR yet | `se-dev-plugin-review`: read its `ReviewPolicy.md` and `ReviewPaths.md`, which hold the rules hub reviewers apply |
+| A hub PR | `se-dev-plugin-review`, the whole skill. Its scripts need the PR's URL |
+| Game behaviour on a server | `se-dev-server-code`, and `se-dev-server-book` first if it is installed |
+| Game behaviour on a client | `se-dev-game-code`, and `se-dev-game-book` first if it is installed |
+| Magnetar plugins | `se-dev-plugin` and `se-dev-plugin-sdk` |
+| Torch plugins | `se-dev-torch`, and `se-dev-torch-book` if it is installed |
+| Quasar UI plugins | `se-dev-quasar-plugin` |
 
 ## Every lead gets a verdict
 
@@ -67,7 +108,8 @@ again, and test the fix. When you are only reviewing a plugin, tell the user wha
 
 - Never change a plugin during a review unless the user asks. Report it.
 - Never run a plugin outside the containers.
-- You never run git yourself. PluginCheck can use git to download repositories into its cache.
+- You never run git yourself. PluginCheck can use git to download repositories into its cache, and a skill's own setup and scripts can use the git
+  and `gh` they need. Anything that changes the user's repositories or posts for them still needs the user to ask, each time.
 - PluginCheck is fully automated. Never make a stage depend on a person writing or checking a per-plugin file.
 - Never cap a run. There is always enough time for PluginCheck to run properly.
 - A reused result is still a result. Judge it like any other, and say in your report what was reused.

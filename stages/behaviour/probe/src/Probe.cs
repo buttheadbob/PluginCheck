@@ -26,6 +26,16 @@ public sealed class CommandInfo
     public List<(string Type, bool Optional)> Parameters = new();
 }
 
+/// <summary>Something to take out of the world while a step's command is running.</summary>
+public sealed class Removal
+{
+    public int Step;
+    public int AfterSeconds;
+    public string Kind = "";
+    public string Name = "";
+    public bool Done;
+}
+
 /// <summary>What differs between hosts: the plugin's commands, and how to run one.</summary>
 public interface IProbeHost
 {
@@ -38,8 +48,8 @@ public interface IProbeHost
 /// game thread, because that is the only thread where the game gives the full answer: off it, BigOwners and entity lookups differ.</summary>
 public sealed class ProbeCore
 {
-    private const int SettleTicks = 15 * 60;
     private const int CheckTicks = 60;
+    private const int ProbePlayerSerial = 77;
 
     private readonly IProbeHost _host;
     private string _mode = "";
@@ -47,6 +57,10 @@ public sealed class ProbeCore
     private int _maxSeconds = 600;
     private readonly List<(string Command, int MinSeconds, int QuietChecks)> _steps = new();
     private readonly List<string> _results = new();
+    private readonly List<Removal> _removals = new();
+    private readonly List<string> _removed = new();
+    private int _settleTicks = 15 * 60;
+    private MyPlayer? _player;
     private int _step;
     private readonly Dictionary<string, string> _settings = new();
     private object? _plugin;
@@ -104,7 +118,7 @@ public sealed class ProbeCore
         {
             if (_startedAt >= 0)
                 Watch();
-            else if (_ticks >= SettleTicks)
+            else if (_ticks >= _settleTicks)
                 Start();
         }
         catch (Exception e)
@@ -135,6 +149,9 @@ public sealed class ProbeCore
     {
         _before = before;
         string command = _steps[_step].Command;
+        _removed.Clear();
+        if (_removals.Any(removal => removal.Step == _step && removal.Kind == "player"))
+            AddPlayer();
         _replies = command.Length > 0 ? _host.Run(command) : new List<string>();
         _last = "";
         _quiet = 0;
@@ -144,6 +161,7 @@ public sealed class ProbeCore
     // Waits for the world to stop changing, since nothing says when a plugin has finished.
     private void Watch()
     {
+        RemoveWhatIsDue();
         if ((_ticks - _startedAt) % CheckTicks != 0)
             return;
         string now = Record();
@@ -158,7 +176,7 @@ public sealed class ProbeCore
 
     private void Conclude(string after, string ended)
     {
-        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
+        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.Select(Quote)) + "],\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
         _step++;
         if (_step < _steps.Count)
         {
@@ -175,6 +193,63 @@ public sealed class ProbeCore
         MyLog.Default.WriteLineAndConsole("PROBE done");
     }
 
+    // On the game thread, the same way an admin or a cleanup plugin would remove these, so a plugin in the middle of work meets it as it really happens.
+    private void RemoveWhatIsDue()
+    {
+        int seconds = (_ticks - _startedAt) / 60;
+        foreach (Removal removal in _removals.Where(removal => removal.Step == _step && !removal.Done && seconds >= removal.AfterSeconds))
+        {
+            removal.Done = true;
+            string what = removal.Kind + " " + removal.Name + " at " + seconds.ToString(CultureInfo.InvariantCulture) + " s";
+            try
+            {
+                Remove(removal);
+                _removed.Add(what);
+            }
+            catch (Exception e)
+            {
+                _removed.Add(what + " failed: " + e.GetType().Name + ": " + e.Message);
+            }
+        }
+    }
+
+    private void Remove(Removal removal)
+    {
+        switch (removal.Kind)
+        {
+            case "grid":
+                Grid(removal.Name).Close();
+                break;
+            case "block":
+                MyCubeGrid grid = Grid(removal.Name);
+                grid.RemoveBlock(grid.GetBlocks().Last(), updatePhysics: true);
+                break;
+            case "identity":
+                MySession.Static.Players.RemoveIdentity(MySession.Static.Players.GetAllIdentities().First(identity => identity.DisplayName == removal.Name).IdentityId);
+                break;
+            case "faction":
+                MyFactionCollection.RemoveFaction(MySession.Static.Factions.TryGetFactionByTag(removal.Name).FactionId);
+                break;
+            case "player":
+                if (_player == null)
+                    throw new InvalidOperationException("no player was added");
+                MySession.Static.Players.RemovePlayer(_player);
+                _player = null;
+                break;
+            default:
+                throw new InvalidOperationException("nothing removes a " + removal.Kind);
+        }
+    }
+
+    private static MyCubeGrid Grid(string name) => MyEntities.GetEntities().OfType<MyCubeGrid>().First(grid => grid.DisplayName == name);
+
+    // The server's own client stands in, because a player needs one and no real client can join a test server.
+    private void AddPlayer()
+    {
+        MyIdentity identity = MySession.Static.Players.CreateNewIdentity("ProbePlayer");
+        _player = MySession.Static.Players.CreateNewPlayer(identity, new MyPlayer.PlayerId(Sync.MyId, ProbePlayerSerial), "ProbePlayer", true, false, true);
+    }
+
     private void ReadScenario()
     {
         string path = Path.Combine(MyFileSystem.UserDataPath, "probe-scenario.txt");
@@ -186,6 +261,12 @@ public sealed class ProbeCore
             string key = line.Substring(0, split);
             string value = line.Substring(split + 1);
             if (key == "mode") _mode = value;
+            else if (key == "settle") _settleTicks = int.Parse(value, CultureInfo.InvariantCulture) * 60;
+            else if (key == "remove")
+            {
+                string[] parts = value.Split(new[] { '|' }, 4);
+                _removals.Add(new Removal { Step = int.Parse(parts[0], CultureInfo.InvariantCulture), AfterSeconds = int.Parse(parts[1], CultureInfo.InvariantCulture), Kind = parts[2], Name = parts[3] });
+            }
             else if (key == "plugin") _pluginName = value;
             else if (key == "step")
             {
@@ -267,12 +348,8 @@ public sealed class ProbeCore
         return "{\"isStatic\":" + Lower(grid.IsStatic) + ",\"size\":" + Quote(grid.GridSizeEnum.ToString()) + ",\"blocks\":" + grid.BlocksCount
             + ",\"owners\":" + Quote(string.Join(",", grid.BigOwners ?? new List<long>())) + ",\"parent\":" + Quote(parent?.DisplayName ?? "")
             + ",\"connection\":" + Quote(connection?.GetType().Name ?? "")
-            + ",\"inGravity\":" + Lower(!Vector3D.IsZero(MyGravityProviderSystem.CalculateNaturalGravityInPoint(grid.PositionComp.GetPosition())))
-            + ",\"position\":" + Quote(Coordinates(grid.PositionComp.GetPosition()))
-            + ",\"speed\":" + (grid.Physics?.LinearVelocity.Length() ?? 0f).ToString("F3", CultureInfo.InvariantCulture) + "}";
+            + ",\"inGravity\":" + Lower(!Vector3D.IsZero(MyGravityProviderSystem.CalculateNaturalGravityInPoint(grid.PositionComp.GetPosition()))) + "}";
     }
-
-    private static string Coordinates(Vector3D at) => string.Format(CultureInfo.InvariantCulture, "{0:F2},{1:F2},{2:F2}", at.X, at.Y, at.Z);
 
     private static string Quote(string text)
     {

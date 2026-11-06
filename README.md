@@ -2,7 +2,8 @@
 
 Tests Space Engineers 1 plugins for Torch, Magnetar and Quasar in containers, so crashes and test data stay off the host.
 [REVIEW.md](REVIEW.md) tells an AI how to review a plugin, including security and legal checks, and how to use these tests.
-[Agent.md](Agent.md) holds the rules for the AI running it: read the code behind every lead, and give each one a verdict.
+[Agent.md](Agent.md) holds the rules for the AI running it: read the code behind every lead, and give each one a verdict. No stage uses the
+[`se-dev` skills](https://github.com/CometWorks/skills), so the AI loads them itself, and Agent.md says which to use and how to set them up.
 
 ## Use it
 Needs Python 3.11+ and Docker Desktop on the WSL 2 backend. Clone this repository next to your plugin repositories.
@@ -44,6 +45,14 @@ panel off with no warning. An AI running PluginCheck must do the same: [Agent.md
 
 Results land in `runs/<target>/<timestamp>/`: `results.json`, updated after every stage, plus a log for each stage that can be followed live. Worlds and source copies are
 deleted afterwards. Add `--keep` to look at them.
+
+A target can give the `behaviour` stage a `behaviour` section, all of it optional:
+
+| Key | What it does |
+|---|---|
+| `legacy` | Also runs every scenario on MagnetarLegacy, under Proton |
+| `settleSeconds` | How long to wait once the world is ready, 15 by default. For a plugin with a warm-up, which would otherwise refuse every command |
+| `removeDuring` | `commands` to run again while things leave the world, each alone on its server. `minSeconds` is the least each runs for. `remove` lists `after`, `kind` and `name`, where `kind` is `grid`, `block`, `identity`, `faction` or `player`. The player is a `MyPlayer` the probe adds under the server's own client, so this is a player leaving the session, not a real client disconnecting |
 
 Add `--hold` to leave the Quasar-managed server running at http://127.0.0.1:18080 with no time limit, to look around its
 UI. A local request counts as trusted, so no Steam sign-in is needed. The port is only open to this machine. The run
@@ -96,7 +105,7 @@ plugin code. `PULSAR_GITHUB_TOKEN` works too.
 | `legacy` | Our Proton image | The same test on MagnetarLegacy and .NET Framework 4.8. Logs are copied after the server stops, and the game's own log lands in `legacy-game.log` |
 | `regcheck` | .NET SDK image | Every command module registers on its own, using the plugin the loader built. If it has no plugin to test, it says why `magnetar` left none |
 | `quasar` | Official Quasar images | The UI plugin builds against each Quasar version and really loads |
-| `quasar_managed` | Official Quasar image | Quasar starts a server with the plugin and companion, as a real install does |
+| `quasar_managed` | Official Quasar image | Quasar starts a server with the plugin and companion, as a real install does. A Magnetar plugin with no Quasar UI plugin runs too, since Quasar renders its settings |
 | `torch` | Our Proton image | Torch loads the zip and lists every command it registers |
 | `behaviour` | Official Magnetar image and our Proton image | Runs each command and setting on real servers, and compares every build, including the published one. Always `review` |
 | `logcheck` | Host | Reads every log from the run. A stack trace through plugin code fails it |
@@ -238,6 +247,7 @@ Containers are not a hard security boundary. Do not run a plugin you would not t
 | `PLUGINCHECK_BEHAVIOUR_CORES` | Logical cores per server. The default is 2 |
 | `PLUGINCHECK_BEHAVIOUR_ONLY` | Only scenarios containing this text, for working on the stage |
 | `PLUGINCHECK_TORCH_IMAGE`, `PLUGINCHECK_LEGACY_IMAGE` | Use a different image |
+| `PLUGINCHECK_WORLD` | A save folder for `quasar_managed` to start from, in place of Star System, such as one with grids a plugin acts on, for a hand test with `--hold` |
 | `PULSAR_GITHUB_TOKEN` | A GitHub token, in place of `github-token.txt` |
 
 ## Add a plugin
@@ -263,7 +273,7 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
   runs ask for less.
 - **Magnetar's downloads can time out.** GitHub can take 9 to 14 seconds to answer for the LinuxCompat release files, and Pulsar gives
   up. `magnetar` and `legacy` end as `unable to verify`. `behaviour` tries a server 3 times, then reports it as `FAILED`, or lists the
-  build in `buildsLeftOut`.
+  build in `buildsLeftOut`. A working build that can't be discovered stops the stage as `not run`, and a published one only narrows the comparison.
 - **Load stages prove commands register, not that they work.** Magnetar has no console, and `!help` only runs from in-game chat. `behaviour`
   runs each command through the probe, within the limits under [Behaviour](#behaviour).
 - **Torch and Legacy run under Proton.** Proton is not Windows, so a failure is a lead. Confirm it on Windows before calling it

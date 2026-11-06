@@ -89,7 +89,10 @@ results = {'target': target['name'], 'started': datetime.datetime.now().isoforma
 
 
 def needed(stage):
-    if stage in ('magnetar', 'legacy', 'regcheck', 'quasar', 'quasar_managed', 'torch') and stage.replace('regcheck', 'magnetar').replace('legacy', 'magnetar').replace('_managed', '') not in target:
+    # Quasar renders a Magnetar plugin's settings with no UI plugin at all, so a Magnetar build is enough to run under it.
+    if stage == 'quasar_managed':
+        return 'quasar' in target or 'magnetar' in target
+    if stage in ('magnetar', 'legacy', 'regcheck', 'quasar', 'torch') and stage.replace('regcheck', 'magnetar').replace('legacy', 'magnetar') not in target:
         return False
     if stage == 'inherited' and 'upstream' not in target:
         return False
@@ -237,7 +240,7 @@ def run_stage(stage):
         display.stage_finished(stage, reused['status'], f"{stage}: {reused['status']}, reused because nothing it reads has changed. About {left_text()}.")
         return
     result_file = os.path.join(run_dir, stage + '.json')
-    command = [sys.executable, '-I', os.path.join(HERE, script), target_file]
+    command = [sys.executable, '-I', '-X', 'utf8', os.path.join(HERE, script), target_file]
     if stage in NEEDS_DIR:
         command.append(run_dir)
     command.append(result_file)

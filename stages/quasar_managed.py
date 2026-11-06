@@ -12,6 +12,9 @@ Steps, in the order a real install takes them:
   3. The UI plugin and companion are built the way Quasar's installer does, into .quasar/companions/<id>.
   4. Quasar starts the server, which must load the plugin and the companion and reach a loaded world.
 
+A plugin with a Magnetar build and no Quasar UI plugin runs here too, with step 3 left out. Quasar renders its PluginSdk settings
+on the server's Plugins page, so an admin depends on this path as much as on any page, and it needs testing the same way.
+
 Servers, profiles and dev folders are seeded as the JSON files Quasar reads, since creating them is otherwise UI only.
 The admin Steam ID is a placeholder that is never signed in with.
 """
@@ -25,6 +28,7 @@ TOOLS = '/data/ManagedRuntime/Tools'
 DS = f'{TOOLS}/SpaceEngineersDedicatedServer'
 TIMEOUT = 30 * 60
 HOLD = os.environ.get('PLUGINCHECK_HOLD') == '1'
+WORLD = os.environ.get('PLUGINCHECK_WORLD')
 UI_PORT = 18080
 SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
 
@@ -32,7 +36,7 @@ target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
 result_path = sys.argv[3] if len(sys.argv) > 3 else None
 name = target['name']
-conf = target['quasar']
+conf = target.get('quasar')
 repo = target['repo']
 stamp = int(time.time())
 volume = f'plugincheck-quasarrun-{stamp}'
@@ -41,7 +45,7 @@ source = os.path.join(work, 'plugins', name)
 seed = os.path.join(work, 'seed')
 os.makedirs(os.path.join(work, 'plugins'))
 shutil.copytree(repo, source, ignore=SKIP)
-package = json.load(open(os.path.join(source, conf['packageManifest']), encoding='utf-8'))
+package = json.load(open(os.path.join(source, conf['packageManifest']), encoding='utf-8')) if conf else {}
 companions = [c for c in package.get('companionPlugins', []) if isinstance(c, dict)]
 manifest = target['magnetar']['manifest']
 plugin_id = ET.parse(os.path.join(repo, manifest)).getroot().findtext('Id').strip()
@@ -117,6 +121,8 @@ write(os.path.join(seed, 'ConfigProfiles', SERVER, 'profile.json'), {
 write(os.path.join(seed, 'Magnetars', SERVER, 'server.json'), {
     'uniqueName': SERVER, 'displayName': 'PluginCheck', 'inGameServerName': f'PluginCheck {name}', 'inGameWorldName': 'PluginCheck',
     'goalState': 1, 'autoStart': True, 'configProfileId': SERVER, 'worldSaveName': 'World', 'worldTemplateId': '', 'serverPort': 27016})
+if WORLD:
+    shutil.copytree(WORLD, os.path.join(seed, 'Magnetars', SERVER, 'DedicatedServer', 'Saves', 'World'))
 docker('volume', 'create', 'plugincheck-ds-quasar')
 docker('volume', 'create', volume)
 copied = docker('run', '--rm', '--entrypoint', 'bash', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
@@ -150,8 +156,10 @@ if docker('run', '--rm', '--entrypoint', 'test', '-v', f'plugincheck-ds-quasar:{
 
 # 3. Build the way Quasar's installer does, then 4. start the server.
 world = f'/data/Magnetars/{SERVER}/DedicatedServer/Saves/World'
-build = [f'set -e; mkdir -p "{world}"; cp -r "{DS}/Content/CustomWorlds/Star System/." "{world}/"; cd "/plugins/{name}"',
-         f'dotnet build "{package["projectPath"]}" -c Release -v:minimal -p:QuasarPluginAbstractionsAssembly=/opt/quasar/Quasar.Plugin.Abstractions.dll -p:DeployToQuasar=false']
+copy_world = '' if WORLD else f'cp -r "{DS}/Content/CustomWorlds/Star System/." "{world}/"; '
+build = [f'set -e; mkdir -p "{world}"; {copy_world}cd "/plugins/{name}"']
+if package:
+    build.append(f'dotnet build "{package["projectPath"]}" -c Release -v:minimal -p:QuasarPluginAbstractionsAssembly=/opt/quasar/Quasar.Plugin.Abstractions.dll -p:DeployToQuasar=false')
 for c in companions:
     build.append(f'dotnet build "{c["projectPath"]}" -c Release -v:minimal -o ".quasar/companions/{c["id"]}" -p:Platform=x64 '
                  f'-p:CopyLocalLockFileAssemblies=true -p:MagnetarProtocolAssembly=/opt/quasar/Agent/Magnetar.Protocol.dll -p:DS64={DS}/DedicatedServer64')
