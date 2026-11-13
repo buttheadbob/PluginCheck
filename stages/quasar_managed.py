@@ -30,7 +30,8 @@ TIMEOUT = 30 * 60
 HOLD = os.environ.get('PLUGINCHECK_HOLD') == '1'
 WORLD = os.environ.get('PLUGINCHECK_WORLD')
 UI_PORT = 18080
-SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -44,7 +45,7 @@ work = os.path.join(run_dir, 'managed')
 source = os.path.join(work, 'plugins', name)
 seed = os.path.join(work, 'seed')
 os.makedirs(os.path.join(work, 'plugins'))
-shutil.copytree(repo, source, ignore=SKIP)
+shutil.copytree(repo, source, ignore=repocopy.ignore(repo))
 package = json.load(open(os.path.join(source, conf['packageManifest']), encoding='utf-8')) if conf else {}
 companions = [c for c in package.get('companionPlugins', []) if isinstance(c, dict)]
 manifest = target['magnetar']['manifest']

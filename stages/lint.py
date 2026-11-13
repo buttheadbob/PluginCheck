@@ -18,7 +18,8 @@ SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 QUASAR = 'ghcr.io/cometworks/quasar:latest'
 TORCH = 'plugincheck-torch-proton:latest'
-SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 # Style rules that only say the code differs from a default, not that anything is wrong.
 ANALYZERS = ['-p:EnableNETAnalyzers=true', '-p:AnalysisMode=Recommended', '-p:AnalysisLevel=latest', '-p:EnforceCodeStyleInBuild=true',
              '-p:GenerateDocumentationFile=false', '-p:TreatWarningsAsErrors=false', '--no-incremental', '-v:quiet', '-nologo']
@@ -30,7 +31,7 @@ result_path = sys.argv[3] if len(sys.argv) > 3 else None
 work = os.path.join(run_dir, 'lint')
 source = os.path.join(work, 'source')
 os.makedirs(work, exist_ok=True)
-shutil.copytree(target['repo'], source, ignore=SKIP)
+shutil.copytree(target['repo'], source, ignore=repocopy.ignore(target['repo']))
 
 
 def docker(*args):
