@@ -7,7 +7,7 @@ import argparse, datetime, glob, hashlib, json, os, shutil, subprocess, sys, thr
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'stages'))
 from display import Display, STATUS_MARK, clock
-import classification, githubtoken
+import classification, githubtoken, mountdepth
 
 STAGES = {
     # Need no server at all.
@@ -76,6 +76,10 @@ target['repo'] = os.path.normpath(os.path.join(HERE, target['repo']))
 if not os.path.isdir(target['repo']):
     sys.exit(f"{target['repo']} does not exist. Clone the plugin next to PluginCheck.")
 run_dir = os.path.join(HERE, 'runs', target['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+# A folder too deep for Docker Desktop's mounts makes every Legacy and Torch server exit at start (stages/mountdepth.py).
+too_deep = mountdepth.problem(run_dir)
+if too_deep:
+    sys.exit(too_deep)
 os.makedirs(run_dir)
 target_file = os.path.join(run_dir, 'target.json')
 json.dump(target, open(target_file, 'w', encoding='utf-8'), indent=1)
