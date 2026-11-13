@@ -34,7 +34,7 @@ from xml.sax.saxutils import escape
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, extraplugins, fixture, githubtoken, leases, startlog
+import classification, extraplugins, fixture, githubtoken, leases, startlog, timing as server_timing
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -422,16 +422,20 @@ def start_torch(build, seed, folder, container, volume, cores):
                     '-v', f'{os.path.join(folder, "plugins")}:/seed/plugins:ro', TORCH], check=True, stdout=subprocess.DEVNULL)
 
 
-def run_server(build, batch, save, probe_zip):
+def run_server(build, batch, save, probe_zip, queued=None):
+    queued = queued or time.time()
     # An exclusive lease, for a measurement that needs the machine quiet, holds every new server back until it is released.
     while not lending.may_start():
         time.sleep(10)
     cores = slots.get()
+    timing = {'queued': queued, 'slot': time.time(), 'cores': cores}
     with running_lock:
         running[0] += 1
     status(kind='server', cores=cores, build=build['name'], scenario=' + '.join(p.get('name', 'discover') for p in batch))
+    served = None
     try:
-        return serve(build, batch, save, probe_zip, cores)
+        served = serve(build, batch, save, probe_zip, cores, timing)
+        return served
     finally:
         status(kind='done', cores=cores)
         with running_lock:
@@ -447,6 +451,13 @@ def run_server(build, batch, save, probe_zip):
             print(f"  lent {cores} to {lease.get('session')} ({lease.get('container')})", flush=True)
         else:
             slots.put(cores)
+        timing['freed'] = time.time()
+        # Where this server's time went (README, Timing). Measuring only: nothing compared reads it.
+        line, measured = server_timing.summary(timing, served[0].get('probeTiming') if served else None)
+        if line:
+            print(line, flush=True)
+            for record in served or []:
+                record['timing'] = measured
 
 
 def container_log(container):
@@ -456,9 +467,11 @@ def container_log(container):
     return said.stdout + said.stderr
 
 
-def serve(build, batch, save, probe_zip, cores):
-    """One disposable server for the scenarios that share it. Returns what the probe recorded for each, or why it could not."""
+def serve(build, batch, save, probe_zip, cores, timing):
+    """One disposable server for the scenarios that share it. Returns what the probe recorded for each, or why it could not.
+    Notes the host clock in timing as it goes (behaviour/timing.py)."""
     number = next(counter)
+    timing['server'] = f'{number:04}-{build["name"]}'
     folder = os.path.join(work, 'runs', f'{number:04}-{build["name"]}')
     seed = os.path.join(folder, 'seed')
     os.makedirs(seed)
@@ -478,6 +491,7 @@ def serve(build, batch, save, probe_zip, cores):
         seed_torch(build, seed, folder, probe_zip)
         start_torch(build, seed, folder, container, volume, cores)
         instance, info = '/run-data/Instance', None
+    timing['up'] = time.time()
 
     start, state = time.time(), 'timeout'
     while time.time() - start < START_TIMEOUT:
@@ -493,9 +507,11 @@ def serve(build, batch, save, probe_zip, cores):
             break
         time.sleep(1)
     seconds = int(time.time() - start)
+    timing['stopped'], timing['state'] = time.time(), state
     # The record is written and the world is thrown away, so a clean shutdown only wastes the core. Torch ignores the signal under Proton
     # and would sit out the whole timeout. Logs flush as they are written, so nothing is lost.
     docker('kill', container)
+    timing['killed'] = time.time()
     open(os.path.join(folder, 'container.log'), 'w', encoding='utf-8').write(container_log(container))
     docker('cp', f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))
     if magnetar:
@@ -509,6 +525,7 @@ def serve(build, batch, save, probe_zip, cores):
         docker('cp', f'{container}:/run-data/Logs/.', os.path.join(folder, 'logs'))
     docker('rm', '-f', '-v', container)
     docker('volume', 'rm', volume)
+    timing['cleaned'] = time.time()
     shutil.rmtree(seed, ignore_errors=True)
     shutil.rmtree(os.path.join(folder, 'source'), ignore_errors=True)
     shutil.rmtree(os.path.join(folder, 'plugins'), ignore_errors=True)
@@ -602,13 +619,13 @@ def remembered(build, batch, repeat):
     return [{**r, 'reused': True} for r in json.load(open(path, encoding='utf-8'))]
 
 
-def run_and_remember(build, batch, repeat):
+def run_and_remember(build, batch, repeat, queued=None):
     """A published build never changes, and neither does unchanged code, so a result only has to be earned once. Failures are never kept."""
-    results = run_with_retry(build, batch, save, probe_zip)
+    results = run_with_retry(build, batch, save, probe_zip, queued)
     if all(r.get('state') == 'recorded' and 'after' in r for r in results):
         folder = os.path.join(cache, 'results')
         os.makedirs(folder, exist_ok=True)
-        json.dump(results, open(os.path.join(folder, job_key(build, batch, repeat) + '.json'), 'w', encoding='utf-8'))
+        json.dump(server_timing.without(results), open(os.path.join(folder, job_key(build, batch, repeat) + '.json'), 'w', encoding='utf-8'))
     return results
 
 
@@ -617,15 +634,16 @@ def run_and_remember_discovery(build):
     if results[0].get('state') == 'recorded' and 'commands' in results[0]:
         folder = os.path.join(cache, 'results')
         os.makedirs(folder, exist_ok=True)
-        json.dump(results, open(os.path.join(folder, job_key(build, [{'mode': 'discover'}], 0) + '.json'), 'w', encoding='utf-8'))
+        json.dump(server_timing.without(results), open(os.path.join(folder, job_key(build, [{'mode': 'discover'}], 0) + '.json'), 'w', encoding='utf-8'))
     return results
 
 
-def run_with_retry(build, batch, save, probe_zip):
+def run_with_retry(build, batch, save, probe_zip, queued=None):
     """A server that never reached the plugin says nothing about it. A rate limit can be waited out, and a dropped download tried again."""
     attempts = 0
     while True:
-        records_here = run_server(build, batch, save, probe_zip)
+        records_here = run_server(build, batch, save, probe_zip, queued)
+        queued = None  # a retry is queued from the moment it is retried
         record = records_here[0]
         if not record.get('blocked'):
             return records_here
@@ -1040,7 +1058,7 @@ for (build, batch, repeat), results in kept_results:
 
 finished = 0
 with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-    futures = {pool.submit(run_and_remember, b, batch, r): (b, batch, r) for b, batch, r in jobs}
+    futures = {pool.submit(run_and_remember, b, batch, r, time.time()): (b, batch, r) for b, batch, r in jobs}
     for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
         finished = done
         build, batch, repeat = futures[future]
@@ -1062,7 +1080,7 @@ if suspect:
     # They join the count, so the progress never says done while these still run.
     total = len(jobs) + len(again)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        futures = {pool.submit(run_and_remember, b, [p], r): (b, r, p['name']) for b, p, r in again}
+        futures = {pool.submit(run_and_remember, b, [p], r, time.time()): (b, r, p['name']) for b, p, r in again}
         for future in concurrent.futures.as_completed(futures):
             build, repeat, alone = futures[future]
             finished += 1

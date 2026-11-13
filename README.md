@@ -204,6 +204,9 @@ The world has no programmable blocks unless a target asks for them, and on a wor
 - **Settings that work together.** On/off settings flip one at a time, and other kinds of setting are not changed.
 - **Legacy.** Only Magnetar Interim and Torch run this stage.
 
+### Timing
+Every server prints one `timing` line in `behaviour.log` when its slot is freed. It gives the seconds from getting the slot until each point: the container is up, the game is ready, the record appears (or the server stops without one), it is killed, it is cleaned up, and its slot is freed. It also gives the wait for the slot before that, and the sim speed: game seconds per wall second while the probe ran, where 1 is full speed. The same numbers are in each record's `timing` field, and the probe's own numbers are in `probeTiming`. Game ready is worked out back from the record using the probe's own time span, so the container's clock doesn't have to match the host's. These numbers are for measuring only: no comparison reads them. A result kept for later runs is saved without them, so a reused result has no `timing` or `probeTiming`.
+
 ## Lending slots to other sessions
 The behaviour stage runs its servers in slots of two logical cores each. Other sessions can borrow some of them for in-game work,
 such as mod or Torch fixes. They may not borrow them to check another plugin: that is a PluginCheck run.
