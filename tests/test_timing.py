@@ -22,12 +22,12 @@ def comparison_functions():
 class SummaryTests(unittest.TestCase):
     def test_a_full_server(self):
         t = {'server': '0012-Monitor', 'cores': '4-5', 'queued': 100.0, 'slot': 103.0, 'up': 112.0, 'stopped': 233.0, 'state': 'recorded',
-             'killed': 234.0, 'cleaned': 245.0, 'freed': 245.5}
+             'killed': 234.0, 'freed': 234.5, 'cleaned': 245.0}
         line, out = timing.summary(t, {'readySeconds': 85.0, 'ticks': 5000, 'simSpeed': 0.98})
-        self.assertEqual(out, {'waitedSeconds': 3.0, 'upSeconds': 9.0, 'stoppedSeconds': 130.0, 'killedSeconds': 131.0, 'cleanedSeconds': 142.0,
-                               'freedSeconds': 142.5, 'readySeconds': 45.0, 'simSpeed': 0.98, 'state': 'recorded'})
+        self.assertEqual(out, {'waitedSeconds': 3.0, 'upSeconds': 9.0, 'stoppedSeconds': 130.0, 'killedSeconds': 131.0, 'freedSeconds': 131.5,
+                               'cleanedSeconds': 142.0, 'readySeconds': 45.0, 'simSpeed': 0.98, 'state': 'recorded'})
         self.assertEqual(line, '  timing 0012-Monitor on 4-5: waited 3s for a slot, up 9s, game ready 45s, recorded 130s, killed 131s, '
-                               'cleaned up 142s, slot freed 142.5s, sim speed 0.98')
+                               'slot freed 131.5s, cleaned up 142s, sim speed 0.98')
 
     def test_a_server_that_timed_out_has_no_probe_timing(self):
         t = {'server': '0003-x', 'cores': '0-1', 'queued': 0.0, 'slot': 0.0, 'up': 5.0, 'stopped': 1205.0, 'state': 'timeout', 'killed': 1206.0, 'freed': 1210.0}

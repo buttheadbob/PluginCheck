@@ -88,6 +88,8 @@ class Replay:
         self.discovered_at, self.server_started = {}, []
         self.random = random.Random(case.get('seed', 0))
         self.namespace = {}
+        self.running = self.most_running = self.cleaning = 0
+        self.overlapped = False
 
     # ---- what replaces the outside world ----
 
@@ -122,8 +124,9 @@ class Replay:
         record['build'] = build['name']
         return record
 
-    def serve(self, build, batch, save, probe_zip, cores, timing=None):
-        # A behaviour.py from before its timing points passes no timing dict.
+    def serve(self, build, batch, save, probe_zip, cores, timing=None, free=None):
+        """A server: its records after a while, then, with a free() to call, its cores back at the kill and a clean-up after it.
+        A behaviour.py from before its timing points passes no timing dict."""
         timing = {} if timing is None else timing
         timing['server'] = f"{build['name']}"
         repeat = self.case['_repeat'].value if hasattr(self.case['_repeat'], 'value') else 0
@@ -140,10 +143,22 @@ class Replay:
             return [found]
         with self.lock:
             self.server_started.append((time.monotonic(), build['name']))
+            self.running += 1
         alone = len(batch) == 1 and batch[0].get('command') and 'readonly' not in batch[0]
         records = [self.record_for(build, plan, repeat, alone) for plan in batch]
         time.sleep(self.case.get('job_scale', 0.0001) * max(r.get('seconds', 60) for r in records) * (0.5 + self.random.random()))
         timing['stopped'], timing['state'] = time.time(), 'recorded'
+        with self.lock:
+            self.running -= 1
+            self.most_running = max(self.most_running, self.running + 1)
+            self.cleaning += 1
+        if free:
+            free()
+        # A server's clean-up: with its cores given back, another server can run meanwhile.
+        time.sleep(self.case.get('cleanup', 0))
+        with self.lock:
+            self.overlapped = self.overlapped or self.running > 0
+            self.cleaning -= 1
         return [{**r, 'scenario': plan['name'], 'sharedAfter': position} for position, (plan, r) in enumerate(zip(batch, records))]
 
     def finish(self, status, **fields):

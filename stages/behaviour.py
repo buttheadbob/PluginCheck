@@ -50,6 +50,7 @@ PROBE = 'PluginCheckProbe'
 PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b10'
 TORCH_PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b11'
 START_TIMEOUT = 20 * 60
+CHECK_SECONDS = 5
 IDLE_SECONDS = 120
 # All a plugin can tell about being on a cluster: PluginSdk's PluginCluster.IsClusterProcess reads the first, and PluginStorage the second. One process
 # with these is a cluster node to a plugin, with no gateway or other nodes, and a line that writes the shared folder stands in for another node.
@@ -371,7 +372,7 @@ def start_magnetar(build, seed, folder, container, volume, cores, node=False):
     token_args, token_env = githubtoken.for_container()
     subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
                     '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour', *(CLUSTER_NODE if node else []),
-                    '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
+                    '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro', '-v', f'{os.path.join(folder, "marker")}:/data/marker',
                     '-v', f'{os.path.join(folder, "source")}:/plugin:ro', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
                    check=True, stdout=subprocess.DEVNULL, env=token_env)
 
@@ -380,7 +381,7 @@ def start_legacy(seed, folder, container, volume, cores):
     token_args, token_env = githubtoken.for_container()
     subprocess.run(['docker', 'run', '-d', '--name', container, '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m',
                     '--add-host', NO_CRASH_REPORTS, *token_args, '-v', f'{VOLUMES["legacy"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
-                    '-v', f'{os.path.join(folder, "source")}:/plugin:ro', LEGACY], check=True, stdout=subprocess.DEVNULL, env=token_env)
+                    '-v', f'{os.path.join(folder, "marker")}:/data/marker', '-v', f'{os.path.join(folder, "source")}:/plugin:ro', LEGACY], check=True, stdout=subprocess.DEVNULL, env=token_env)
 
 
 def seed_torch(build, seed, folder, probe_zip):
@@ -418,7 +419,7 @@ def seed_torch(build, seed, folder, probe_zip):
 
 def start_torch(build, seed, folder, container, volume, cores):
     subprocess.run(['docker', 'run', '-d', '--name', container, '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--add-host', NO_CRASH_REPORTS, '-e', 'DS_UPDATE=0',
-                    '-v', f'{VOLUMES["torch"]}:/ds', '-v', f'{volume}:/run-data', '-v', f'{seed}:/seed/data:ro',
+                    '-v', f'{VOLUMES["torch"]}:/ds', '-v', f'{volume}:/run-data', '-v', f'{seed}:/seed/data:ro', '-v', f'{os.path.join(folder, "marker")}:/run-data/marker',
                     '-v', f'{os.path.join(folder, "plugins")}:/seed/plugins:ro', TORCH], check=True, stdout=subprocess.DEVNULL)
 
 
@@ -433,13 +434,13 @@ def run_server(build, batch, save, probe_zip, queued=None):
         running[0] += 1
     status(kind='server', cores=cores, build=build['name'], scenario=' + '.join(p.get('name', 'discover') for p in batch))
     served = None
-    try:
-        served = serve(build, batch, save, probe_zip, cores, timing)
-        return served
-    finally:
+
+    def free():
+        """Gives the cores back, once: serve() calls it as soon as the container is killed, since copying logs and removing the container
+        need no cores, and the finally below calls it for a server that ended before that."""
+        if 'freed' in timing:
+            return
         status(kind='done', cores=cores)
-        with running_lock:
-            running[0] -= 1
         # A finished server's slot goes to a session waiting to borrow one, or back to the run (README, Lending slots).
         # Lending.free never raises, and gives None on an error, so the slot stays the run's and serve()'s result stands.
         try:
@@ -452,6 +453,15 @@ def run_server(build, batch, save, probe_zip, queued=None):
         else:
             slots.put(cores)
         timing['freed'] = time.time()
+
+    try:
+        served = serve(build, batch, save, probe_zip, cores, timing, free)
+        return served
+    finally:
+        free()
+        # Counted as running until now, while it is cleaned up, so an exclusive lease for a quiet machine waits for the clean-up too.
+        with running_lock:
+            running[0] -= 1
         # Where this server's time went (README, Timing). Measuring only: nothing compared reads it.
         line, measured = server_timing.summary(timing, served[0].get('probeTiming') if served else None)
         if line:
@@ -467,9 +477,9 @@ def container_log(container):
     return said.stdout + said.stderr
 
 
-def serve(build, batch, save, probe_zip, cores, timing):
+def serve(build, batch, save, probe_zip, cores, timing, free):
     """One disposable server for the scenarios that share it. Returns what the probe recorded for each, or why it could not.
-    Notes the host clock in timing as it goes (behaviour/timing.py)."""
+    Notes the host clock in timing as it goes (behaviour/timing.py), and calls free() to give its cores back once it is killed."""
     number = next(counter)
     timing['server'] = f'{number:04}-{build["name"]}'
     folder = os.path.join(work, 'runs', f'{number:04}-{build["name"]}')
@@ -477,6 +487,9 @@ def serve(build, batch, save, probe_zip, cores, timing):
     os.makedirs(seed)
     shutil.copytree(save, os.path.join(seed, 'Instance', 'Saves', 'Fixture'))
     write(os.path.join(seed, 'Instance', 'probe-scenario.txt'), scenario_file(build, batch))
+    # The probe copies its record here (Probe.cs, Finish), so the wait below sees it on this disk.
+    marker = os.path.join(folder, 'marker', 'probe.json')
+    os.makedirs(os.path.dirname(marker))
     container = f'plugincheck-behaviour-{os.getpid()}-{number}'
     volume = container + '-data'
     magnetar = build['host'] in ('magnetar', 'legacy')
@@ -493,25 +506,34 @@ def serve(build, batch, save, probe_zip, cores, timing):
         instance, info = '/run-data/Instance', None
     timing['up'] = time.time()
 
-    start, state = time.time(), 'timeout'
+    # Asking Docker once a second for every server was up to 48 docker commands a second on a full run. Docker is asked every CHECK_SECONDS
+    # instead, for a record the copy missed, a Torch fatal error, or a server that ended.
+    check = f'test -f {instance}/probe.json && echo recorded' + ('' if magnetar else ' || (grep -qF "[FATAL]" /run-data/Logs/Torch-*.log && echo fatal)')
+    start, state, asked = time.time(), 'timeout', 0
     while time.time() - start < START_TIMEOUT:
-        if docker('exec', container, 'test', '-f', instance + '/probe.json').returncode == 0:
+        if os.path.exists(marker):
             state = 'recorded'
             break
-        # Torch logs a fatal error and then hangs instead of exiting.
-        if not magnetar and docker('exec', container, 'bash', '-c', 'grep -qF "[FATAL]" /run-data/Logs/Torch-*.log').returncode == 0:
-            state = 'fatal'
-            break
-        if docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
-            state = 'exited'
-            break
-        time.sleep(1)
+        if time.time() - asked >= CHECK_SECONDS:
+            asked = time.time()
+            # Torch logs a fatal error and then hangs instead of exiting.
+            said = docker('exec', container, 'sh', '-c', check)
+            if said.stdout.strip() in ('recorded', 'fatal'):
+                state = said.stdout.strip()
+                break
+            if said.returncode and docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
+                state = 'exited'
+                break
+        time.sleep(0.5)
     seconds = int(time.time() - start)
     timing['stopped'], timing['state'] = time.time(), state
     # The record is written and the world is thrown away, so a clean shutdown only wastes the core. Torch ignores the signal under Proton
     # and would sit out the whole timeout. Logs flush as they are written, so nothing is lost.
-    docker('kill', container)
+    killed = docker('kill', container)
     timing['killed'] = time.time()
+    # The cores go back now, unless the container still runs after all: then once it is removed below.
+    if killed.returncode == 0 or docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
+        free()
     open(os.path.join(folder, 'container.log'), 'w', encoding='utf-8').write(container_log(container))
     docker('cp', f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))
     if magnetar:
@@ -527,6 +549,7 @@ def serve(build, batch, save, probe_zip, cores, timing):
     docker('volume', 'rm', volume)
     timing['cleaned'] = time.time()
     shutil.rmtree(seed, ignore_errors=True)
+    shutil.rmtree(os.path.dirname(marker), ignore_errors=True)
     shutil.rmtree(os.path.join(folder, 'source'), ignore_errors=True)
     shutil.rmtree(os.path.join(folder, 'plugins'), ignore_errors=True)
 
@@ -1057,7 +1080,10 @@ for (build, batch, repeat), results in kept_results:
     take(build, repeat, results)
 
 finished = 0
-with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+# A server gives its cores back when it is killed (serve), and its clean-up then runs beside the next server. The spare threads are what start
+# that next server: they wait in run_server for a slot, so the slots, not the threads, still decide how many servers run.
+pool_threads = workers + max(2, workers // 4)
+with concurrent.futures.ThreadPoolExecutor(pool_threads) as pool:
     futures = {pool.submit(run_and_remember, b, batch, r, time.time()): (b, batch, r) for b, batch, r in jobs}
     for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
         finished = done
@@ -1079,7 +1105,7 @@ if suspect:
     again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if runs_on(b, by_name[n]) for r in range(REPEATS)]
     # They join the count, so the progress never says done while these still run.
     total = len(jobs) + len(again)
-    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+    with concurrent.futures.ThreadPoolExecutor(pool_threads) as pool:
         futures = {pool.submit(run_and_remember, b, [p], r, time.time()): (b, r, p['name']) for b, p, r in again}
         for future in concurrent.futures.as_completed(futures):
             build, repeat, alone = futures[future]
