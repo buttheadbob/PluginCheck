@@ -322,7 +322,8 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
   up. `magnetar` and `legacy` end as `unable to verify`. `behaviour` tries a server 3 times, then reports it as `FAILED`, or lists the
   build in `buildsLeftOut`. A working build that can't be discovered stops the stage as `not run`, and a published one only narrows the comparison.
 - **Load stages prove commands register, not that they work.** Magnetar has no console, and `!help` only runs from in-game chat. `behaviour`
-  runs each command through the probe, within the limits under [Behaviour](#behaviour).
+  runs each command through the probe, within the limits under [Behaviour](#behaviour). Quasar only proves the plugin loads, serves its pages and
+  reaches its settings, and Legacy runs commands only with `"legacy": true` in the target's `behaviour` section.
 - **Torch and Legacy run under Proton.** Proton is not Windows, so a failure is a lead. Confirm it on Windows before calling it
   a plugin defect. `steamcmd`'s Linux `steamclient.so` is linked in for Proton's Steam bridge, so no Steam client or sign-in is
   needed.
