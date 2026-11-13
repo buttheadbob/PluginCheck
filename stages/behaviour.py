@@ -25,7 +25,7 @@ says only that these scenarios agreed. See README.md for what it cannot prove.
 Servers run side by side, each pinned to its own CORES_PER_SERVER logical cores so they cannot slow each other's timing. How many is worked
 out from what Docker can see. PLUGINCHECK_BEHAVIOUR_WORKERS overrides it, and PLUGINCHECK_BEHAVIOUR_CORES sets the cores each.
 
-PLUGINCHECK_BEHAVIOUR_ONLY limits a run to scenarios containing that text, for working on this stage.
+PLUGINCHECK_BEHAVIOUR_ONLY limits a run to scenarios containing that text, or any of several separated by ||, for working on this stage.
 """
 import atexit, concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
@@ -677,7 +677,9 @@ def generate(discovered, relevant, examples):
             if flip and (reads is None or name in reads):
                 plans.append({'name': f'{key} with {name}={value}', **call, 'settings': {**call.get('settings', {}), name: value}})
     only = os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')
-    return [p for p in plans if only.lower() in p['name'].lower()] if only else plans
+    # Several texts, separated by ||, keep scenarios containing any of them.
+    texts = [t.strip().lower() for t in only.split('||') if t.strip()] if only else []
+    return [p for p in plans if any(t in p['name'].lower() for t in texts)] if texts else plans
 
 
 def runs_on(build, plan):
