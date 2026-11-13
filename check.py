@@ -325,7 +325,7 @@ json.dump(results, open(path, 'w', encoding='utf-8'), indent=1)
 
 # Each stage keeps its own logs. These folders are server installs and source copies, and add up to gigabytes per run.
 if not args.keep and not args.hold:
-    for folder in ('data', 'source', 'quasar-data', 'quasar-source', 'upstream', 'regcheck', 'torch-data', 'torch-plugins', 'managed', 'legacy', 'behaviour', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'lint'):
+    for folder in ('data', 'source', 'quasar-data', 'quasar-source', 'upstream', 'regcheck', 'torch-data', 'torch-plugins', 'managed', 'legacy', 'behaviour', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'storage', 'lint'):
         shutil.rmtree(os.path.join(run_dir, folder), ignore_errors=True)
 
 display.close()
