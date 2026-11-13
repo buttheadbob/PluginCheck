@@ -63,10 +63,14 @@ def magnetar_plugin(spec, cache):
     return folder, spec['manifest'], root.findtext('Id').strip(), root.findtext('FriendlyName').strip()
 
 
-def torch_project(source, folder, out):
+XAML_ROOTS = {'UserControl': 'System.Windows.Controls.UserControl', 'Window': 'System.Windows.Window', 'Page': 'System.Windows.Controls.Page'}
+
+
+def torch_project(source, folder, out, torch_libs=None):
     """An SDK project for a Torch plugin's folder, compiled on Linux: its own .cs files and any shared project they import,
     its references mapped to Torch's (/work/torch) and the game's (/ds/DedicatedServer64) assemblies, and a stand-in for each
-    XAML page, which a server with no UI never opens."""
+    XAML page, which a server with no UI never opens. With torch_libs, a reference goes to Torch's copy when Torch has that file
+    and to the game's otherwise, whatever folder its HintPath names."""
     project = next(f for f in os.listdir(os.path.join(source, folder)) if f.endswith('.csproj'))
     root = ET.parse(os.path.join(source, folder, project)).getroot()
     tag = lambda e: e.tag.split('}')[-1]
@@ -91,7 +95,10 @@ def torch_project(source, folder, out):
             hint = next((c.text for c in e if tag(c) == 'HintPath'), None)
             if hint:
                 parts = hint.replace('\\', '/').split('/')
-                where = '/ds/DedicatedServer64' if 'DedicatedServer64' in parts else '/work/torch'
+                if torch_libs:
+                    where = '/work/torch' if os.path.exists(os.path.join(torch_libs, parts[-1])) else '/ds/DedicatedServer64'
+                else:
+                    where = '/ds/DedicatedServer64' if 'DedicatedServer64' in parts else '/work/torch'
                 references.append(f'    <Reference Include={quoteattr(name)}><HintPath>{where}/{parts[-1]}</HintPath><Private>false</Private></Reference>')
             else:
                 references.append(f'    <Reference Include={quoteattr(name)} />')
@@ -105,7 +112,10 @@ def torch_project(source, folder, out):
                     ns, cls = match.group(1).rsplit('.', 1)
                     named = dict((n, t) for t, n in re.findall(r'<(\w+)\b[^<>]*?\s(?:x:)?Name\s*=\s*"(\w+)"', text))
                     fields = ''.join(f'internal System.Windows.Controls.{t} {n} = null; ' for n, t in sorted(named.items()) if t != 'UserControl')
-                    stubs.append(f'namespace {ns} {{ partial class {cls} {{ {fields}private void InitializeComponent() {{ }} }} }}')
+                    # The base type is the XAML's root element, which code-behind often leaves out because the XAML compiler supplies it.
+                    top = re.search(r'<(?![?!])([\w:]+)', text)
+                    base = XAML_ROOTS.get(top.group(1)) if top else None
+                    stubs.append(f'namespace {ns} {{ partial class {cls}{" : " + base if base else ""} {{ {fields}private void InitializeComponent() {{ }} }} }}')
     os.makedirs(out, exist_ok=True)
     open(os.path.join(out, 'Pages.g.cs'), 'w', encoding='utf-8').write('\n'.join(stubs))
     assembly = (root.findtext('.//{*}AssemblyName') or root.findtext('.//AssemblyName') or os.path.splitext(project)[0]).strip()
@@ -135,16 +145,21 @@ def torch_project(source, folder, out):
 def torch_plugin(spec, cache, work, docker, sdk, torch_libs, ds_volume):
     """(zip path, guid, name) of a Torch plugin built from source, or raises with the build's own error."""
     source = fetch(spec['repo'], spec['ref'], cache)
-    folder = spec['folder']
+    name = ET.parse(os.path.join(source, spec['folder'], 'manifest.xml')).getroot().findtext('Name').strip()
+    return torch_zip(source, spec['folder'], os.path.join(work, f'extra-{name}'), docker, sdk, torch_libs, ds_volume)
+
+
+def torch_zip(source, folder, out, docker, sdk, torch_libs, ds_volume):
+    """(zip path, guid, name) of the Torch plugin in source/folder, built on Linux with its own manifest.xml, or raises with the build's
+    own error. Kept in out, and built once."""
     manifest = os.path.join(source, folder, 'manifest.xml')
     root = ET.parse(manifest).getroot()
     guid, name = root.findtext('Guid').strip(), root.findtext('Name').strip()
-    out = os.path.join(work, f'extra-{name}')
     zip_path = os.path.join(out, f'{name}.zip')
     if os.path.exists(zip_path):
         return zip_path, guid, name
     build = os.path.join(out, 'build')
-    assembly = torch_project(source, folder, build)
+    assembly = torch_project(source, folder, build, torch_libs)
     made = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{source}:/work/source:ro', '-v', f'{build}:/work/build', '-v', f'{torch_libs}:/work/torch:ro',
                   '-v', f'{ds_volume}:/ds:ro', '--entrypoint', 'bash', sdk, '-c', 'cd /work/build; dotnet build -c Release -v q -nologo -o /work/build/out > /work/build/build.log 2>&1')
     dll = os.path.join(build, 'out', assembly + '.dll')
@@ -170,8 +185,12 @@ def variant_builds(builds, options, work, overlay_copy):
             build = {**base, 'name': f"{base['name']}~{variant['name']}", 'variant': variant['name'], 'with': variant.get('with', []),
                      'config': variant.get('config', {}), 'files': variant.get('files', {}), 'only': variant.get('scenarios')}
             if variant.get('overlay'):
-                if 'source' not in base:
+                if base['host'] == 'torch':
+                    # A Torch build is a zip, so its zip is built from the overlaid source once the Torch libraries are in place.
+                    build['overlay'] = variant['overlay']
+                elif 'source' not in base:
                     continue
-                build['source'] = overlay_copy(base, variant['overlay'], build['name'])
+                else:
+                    build['source'] = overlay_copy(base, variant['overlay'], build['name'])
             made.append(build)
     return made

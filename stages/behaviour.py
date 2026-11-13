@@ -662,6 +662,9 @@ def base_hash(build):
         return build['version']
     if 'source' in build:
         return classification.folder_hash(build['source'])
+    # A zip built in this run differs byte for byte each time, so it is found again by the source it was built from.
+    if 'overlay_source' in build:
+        return classification.folder_hash(build['overlay_source'])
     return hashlib.sha256(open(build['zip'], 'rb').read()).hexdigest()[:16]
 
 
@@ -962,6 +965,19 @@ for build in builds:
         except (KeyError, OSError, RuntimeError, ET.ParseError) as e:
             finish('not run', reason=f"{build['name']} needs the plugin {label}, which could not be prepared: {e}")
         print(f"{label} for {host}: {extra[label, host][-1] if host == 'magnetar' else extra[label, host][2]}, built from {spec['repo']} at {spec.get('commit') or spec.get('ref')}", flush=True)
+
+# A Torch variant with an overlay runs a zip built from the working source with the overlay laid over it.
+for build in builds:
+    if build['host'] == 'torch' and build.get('overlay'):
+        build['overlay_source'] = os.path.join(work, f"{build['name']}-source")
+        shutil.copytree(repo, build['overlay_source'], ignore=shutil.ignore_patterns('.git', '.vs', '.idea', '.claude', 'bin', 'obj', 'Build'))
+        shutil.copytree(build['overlay'], build['overlay_source'], dirs_exist_ok=True)
+        try:
+            build['zip'] = extraplugins.torch_zip(build['overlay_source'], os.path.dirname(target['torch']['project']), os.path.join(work, f"{build['name']}-zip"),
+                                                  docker, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch'])[0]
+        except (OSError, RuntimeError, ET.ParseError, StopIteration) as e:
+            finish('not run', reason=f"{build['name']}: its overlaid source could not be built: {e}")
+        print(f"{build['name']}: built from the working source with {build['overlay']} laid over it", flush=True)
 
 shutil.rmtree(os.path.join(work, 'torch-libs'), ignore_errors=True)
 
