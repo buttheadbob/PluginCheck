@@ -4,8 +4,11 @@ It uses only terminal escape codes, so PluginCheck still needs nothing but Pytho
 as a log, a pipe or an AI reading the run, it prints the same plain lines as ever. PLUGINCHECK_PLAIN=1 asks for that on a terminal too.
 
 A stage sends status with lines starting @@, holding JSON. They drive the panel and never reach the logs.
+
+The panel's data is also written to live.json in the run folder every second, for a viewer that is not this terminal.
 """
 import atexit, json, os, re, shutil, subprocess, sys, threading, time
+from collections import deque
 
 STATUS_MARK = '@@'
 RESET = '\x1b[0m'
@@ -68,8 +71,9 @@ def can_draw():
 
 
 class Display:
-    def __init__(self, target, planned, past, time_left):
-        self.target, self.planned, self.past, self.time_left = target, planned, past, time_left
+    def __init__(self, target, planned, past, time_left, run_dir=None):
+        self.target, self.planned, self.past, self.time_left, self.run_dir = target, planned, past, time_left, run_dir
+        self.recent = deque(maxlen=100)
         self.fancy = can_draw()
         self.lock = threading.RLock()
         self.begun = time.time()
@@ -88,7 +92,10 @@ class Display:
             atexit.register(self.close)
             self.layout()
             threading.Thread(target=self.tick, daemon=True).start()
+        if self.fancy or run_dir:
             threading.Thread(target=self.watch_docker, daemon=True).start()
+        if run_dir:
+            threading.Thread(target=self.keep_live, daemon=True).start()
 
     def watch_docker(self):
         """Docker is the truth about what is running. Every stage's containers count, not just the ones a stage reports."""
@@ -144,6 +151,7 @@ class Display:
                 if rule.match(text):
                     self.counts[name] += 1
             label = f'[{stage}] ' if stage else ''
+            self.recent.append({'stage': stage, 'text': text})
             if not self.fancy:
                 print(label + text, flush=True)
                 return
@@ -163,9 +171,12 @@ class Display:
 
     def close(self):
         with self.lock:
-            if self.closed or not self.fancy:
+            if self.closed:
                 return
             self.closed = True
+            self.write_live()
+            if not self.fancy:
+                return
             self.draw()
             sys.stdout.write(f'\x1b[r\x1b[?25h\x1b[{self.log_row};1H\n')
             sys.stdout.flush()
@@ -178,6 +189,39 @@ class Display:
             colour = STATUS_COLOURS.get(status, '') if self.fancy else ''
             print(f"{stage:10} {colour}{status}{RESET if colour else ''}{reason}")
         print(path)
+
+    # ---- live.json ----
+
+    def keep_live(self):
+        while not self.closed:
+            self.write_live()
+            time.sleep(1)
+
+    def write_live(self):
+        """Swapped in whole, so a reader never sees half a file. A reader holding it open on Windows only costs one update."""
+        if not self.run_dir:
+            return
+        with self.lock:
+            now = time.time()
+            progress = None
+            if self.progress:
+                progress = {k: v for k, v in self.progress.items() if k not in ('kind', 'at')}
+                progress['left'] = int(max(self.progress['left'] - (now - self.progress['at']), 0))
+            snapshot = {'target': self.target, 'started': int(self.begun), 'updated': int(now), 'finished': self.closed,
+                        'timeLeftSeconds': int(self.time_left()),
+                        'stages': [{'name': s, 'state': self.statuses.get(s, 'running' if s in self.running else 'planned')} for s in self.planned],
+                        'progress': progress,
+                        'servers': [{'cores': c, 'build': s['build'], 'scenario': s['scenario'], 'sinceSeconds': int(now - s['since'])} for c, s in self.servers.items()],
+                        'containers': [{'name': n, 'status': state} for n, state in self.containers],
+                        'counts': dict(self.counts),
+                        'recent': list(self.recent)}
+        path = os.path.join(self.run_dir, 'live.json')
+        try:
+            with open(path + '.tmp', 'w', encoding='utf-8') as out:
+                json.dump(snapshot, out)
+            os.replace(path + '.tmp', path)
+        except OSError:
+            pass
 
     # ---- drawing ----
 

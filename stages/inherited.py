@@ -25,7 +25,7 @@ upstream = os.path.join(unpacked, os.listdir(unpacked)[0], target.get('upstreamS
 EXCLUDE = tuple(target.get('exclude', []))
 KNOWN_NEW = tuple(target.get('knownNew', []))
 EXT = ('.cs', '.xaml')
-SKIP = {'bin', 'obj', '.git', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Essentials.Tests', 'Jenkins'}
+SKIP = {'.claude', 'bin', 'obj', '.git', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Essentials.Tests', 'Jenkins'}
 KW = set('''if else for foreach while do return var new public private protected internal static void bool int long
 double float string class struct enum namespace try catch finally throw null true false this base in out ref is as
 continue break switch case default using readonly const override virtual abstract sealed async await params typeof'''.split())

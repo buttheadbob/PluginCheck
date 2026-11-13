@@ -16,5 +16,9 @@
     "project": "TorchPlugin/Advanced PB Limiter.csproj",
     "zip": "Build/Advanced PB Limiter.zip",
     "guid": "b8dd12fd-36b2-4bea-8f60-a5f7b649a6b9"
+  },
+  "behaviour": {
+    "programmableBlocks": true,
+    "legacy": true
   }
 }

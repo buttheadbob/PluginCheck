@@ -163,7 +163,7 @@ subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--
                 '-v', 'plugincheck-ds-magnetar:/ds',
                 '-v', f'{volume}:/data', '-v', f'{data}:/seed:ro',
                 '-v', f'{os.path.join(run_dir, "source")}:/plugin:ro',
-                IMAGE, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint -consent deny'], check=True, stdout=subprocess.DEVNULL, env=token_env)
+                IMAGE, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'], check=True, stdout=subprocess.DEVNULL, env=token_env)
 logs = open(log_path, 'wb')
 follower = subprocess.Popen(['docker', 'logs', '-f', container], stdout=logs, stderr=subprocess.STDOUT)
 

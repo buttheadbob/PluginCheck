@@ -51,8 +51,13 @@ A target can give the `behaviour` stage a `behaviour` section, all of it optiona
 | Key | What it does |
 |---|---|
 | `legacy` | Also runs every scenario on MagnetarLegacy, under Proton |
+| `shipDrills` | Adds `stages/behaviour/drilling.py`: an asteroid with ship drills of each kind of owner cutting it, and a container in front of where a player caller stands |
+| `programmableBlocks` | Adds the blocks in `stages/behaviour/programmable.py` to the world: each on a static grid out in space with a battery, with scripts that run light, run slow, hold memory, fault, or turn themselves on, for players, NPCs and no one, inside and outside safe zones |
 | `settleSeconds` | How long to wait once the world is ready, 15 by default. For a plugin with a warm-up, which would otherwise refuse every command |
 | `removeDuring` | `commands` to run again while things leave the world, each alone on its server. `minSeconds` is the least each runs for. `remove` lists `after`, `kind` and `name`, where `kind` is `grid`, `block`, `identity`, `faction` or `player`. The player is a `MyPlayer` the probe adds under the server's own client, so this is a player leaving the session, not a real client disconnecting |
+| `plugins` | Other plugins a variant can load beside this one, each built from source at a pinned commit or tag. `stages/behaviour/extraplugins.py` has the format |
+| `variants` | More builds made from each working build: with `plugins` loaded and their `config`, with `files` written before start, or with an `overlay` folder laid over the source, each limited to its `scenarios` |
+| `leaveOut` | Builds to leave out of the run by name, such as a published build known to hang at start |
 
 Add `--hold` to leave the Quasar-managed server running at http://127.0.0.1:18080 with no time limit, to look around its
 UI. A local request counts as trusted, so no Steam sign-in is needed. The port is only open to this machine. The run
@@ -100,6 +105,7 @@ plugin code. `PULSAR_GITHUB_TOKEN` works too.
 | `threads` | .NET SDK image | Lists game objects used off the game thread, following calls through the plugin, and every call to a game member that behaves differently by thread. Leads to read. Always `review`, because no leads proves nothing |
 | `commands` | .NET SDK image | Warns when player-level commands can show data about other players: game data, grids, or a plugin's own records. Some are intended, so it never fails |
 | `nulls` | .NET SDK image | Lists game values that can be null, used with no check first. Leads to read |
+| `storage` | .NET SDK image | Lists what fails on a cluster or a network mount: file calls on the game thread, with no catch on the way up as `UNGUARDED`, failed reads that carry on with defaults, per node files, and state kept by player or grid. Leads to read |
 | `hostpackages` | Host and images | The plugin ships nothing the game or its loader already provides |
 | `magnetar` | Official Magnetar image | The loader compiles the plugin from source and a world loads. If Magnetar itself cannot start, such as on GitHub's rate limit, it ends as `unable to verify` and says why |
 | `legacy` | Our Proton image | The same test on MagnetarLegacy and .NET Framework 4.8. Logs are copied after the server stops, and the game's own log lands in `legacy-game.log` |
@@ -147,8 +153,9 @@ Loading proves little: a plugin can change which grids it acts on, with every ot
 plugin does and records the result. It needs nothing written by a person, and runs by default with no limit on server starts.
 
 1. **Discovers:** a probe plugin loads beside the plugin and reads its commands and settings, on Magnetar and on Torch.
-2. **Generates:** one idle run, then every command, on its own and with each on/off setting its code can reach flipped. Required
-   arguments are filled in by type, and a command with optional on/off arguments also runs with them on.
+2. **Generates:** one idle run, then every command, on its own and with each on/off setting its code can reach flipped. The AI reading
+   the commands gives each one real example lines, and who runs them: the console, a player or an Admin. A command with no example has its
+   arguments filled in by type, which only reaches its first check, so it is listed as `NO EXAMPLE`.
 3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
    probe has its record.
 4. **Compares:** the published build against each working build, and the working builds against each other.
@@ -172,7 +179,17 @@ rotors, wheels, landing gear and connectors, and a moon for gravity. Every build
 is marked `UNSTABLE`, with the builds it happened on, because it depends on timing. `PLUGINCHECK_REPEATS` sets how many runs each build gets.
 
 The probe records on the game thread, the only place the game gives the full answer. Results land in `behaviour.json`, with every
-record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+record in `behaviour-records.json`, and what every command said in `behaviour-replies.txt`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+
+A finished server only proves that a server finished. Two builds that fail the same way agree, so a command that never ran fails the stage,
+and how far each command got has to be read from `behaviour-replies.txt`.
+
+Commands run as the console unless an example names a caller. A caller is a made-up online player with a character, because no real client can
+join a test server, and a second one, ProbeTarget, is there to be acted on. Replies are captured, since nothing could receive them. On Torch, a
+player's command skips `OnCommandExecuting`, so a plugin's own permission hook does not run. Settings that hold a list, such as auto commands
+and presets, start empty, so the commands that use them stop at "not found".
+
+The world has no programmable blocks unless a target asks for them, and on a world with them the probe also records each block's state, and what its script was doing in `behaviour-records.json`. An example can then say `settle` and `min`, the seconds before it runs and after, and `settings` of any type. Lines joined with ` && ` run on one server, and `probe:recompile <block name>` and `probe:save` do what a client or an autosave would. An example with `node` runs on Magnetar as a cluster node, set by the two variables PluginSdk reads, with a shared folder, and `probe:sharedwrite`, `probe:sharedread` and `probe:sharedremove` stand in for another node writing it. That is one node, not a cluster: no gateway, no handover and no second process. Blocks named `watch-*` are recorded with the names of what they hold. Example lines use a command's real case, because Torch's are case sensitive. `stages/classification.py` has the details.
 
 **What it cannot prove:**
 - **Correctness.** No difference only means the builds agree, and both may be wrong.
@@ -187,6 +204,33 @@ record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagr
 - **Settings that work together.** On/off settings flip one at a time, and other kinds of setting are not changed.
 - **Legacy.** Only Magnetar Interim and Torch run this stage.
 
+## Lending slots to other sessions
+The behaviour stage runs its servers in slots of two logical cores each. Other sessions can borrow some of them for in-game work,
+such as mod or Torch fixes. They may not borrow them to check another plugin: that is a PluginCheck run.
+
+- A session borrows at most 2 slots, and at most 3 sessions borrow at once, so a run always keeps the rest.
+- A slot is handed over only when one of PluginCheck's servers finishes in it. A running server is never stopped. With no run
+  going, a request is granted at once.
+- The borrower pins its container to the lease's cores and names it `<session>-<n>`, never `plugincheck-*`.
+- A lease with no heartbeat for 5 minutes ends. If its container still runs, the slot stays out of use until it stops.
+  PluginCheck never stops another session's container.
+- An exclusive request, for measurements that need a quiet machine, drains everything: no new lease and no new PluginCheck
+  server. It is granted, as cores `all`, once nothing else runs.
+
+The leases are one file, `machine/leases.json` in this folder (`PLUGINCHECK_MACHINE_DIR` moves it), changed under a
+lock. Sessions use `lease.py`:
+
+```
+python lease.py request   --session NAME --count 2 --purpose "mod fix test"
+python lease.py heartbeat --session NAME        # at least every minute while working
+python lease.py release   --session NAME [--cores 4-5]
+python lease.py status
+```
+
+Each call prints the session's leases as JSON. Keep calling `request` or `heartbeat` until the count is reached, then start each
+container with `docker run --cpuset-cpus <cores> --name <container> ...`. The rules are in `stages/leases.py`, tested without
+Docker by `python -m unittest discover -s tests`.
+
 ## Isolation
 Nothing is shared between systems, so an update or a layout change in one cannot affect another:
 
@@ -198,8 +242,8 @@ Nothing is shared between systems, so an update or a layout change in one cannot
 | Quasar-managed | `plugincheck-ds-quasar` volume | Per run |
 | Torch | `plugincheck-ds-torch` volume | Per run |
 
-Test servers are private and send no telemetry: Torch analytics are off, Magnetar runs with `-consent deny`, and Quasar
-uploads nothing without an admin's consent. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
+Test servers are private. Torch analytics are off, and Quasar uploads nothing without an admin's consent. Magnetar runs with its
+defaults: it adds its companion mod MagnetarMod to the world, and turns its own telemetry off when it has no interactive terminal, as in these containers. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
 library hits internal asserts under Legacy and would upload a crash dump for each. Failed test runs do not reach anyone's error
 reports.
 
@@ -267,6 +311,10 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
 - **Quasar 1.4.1.1 image:** `release.json` says `1.4.1-1` while the program reports `1.4.1.1`, so it cannot write the
   migration receipt that Quasar 1.5 requires, and a fresh 1.5 container cannot start. The `quasar` stage corrects that
   one field for the 1.4.1.1 step, so Quasar's own code writes the real receipt. Results record `releaseJsonWorkaround`.
+- **Torch passes the wrong arguments for some values.** `CommandTree.GetCommand` finds a command's arguments by searching the whole line for
+  the first one, so `on` in `!monitor everything on` is found in "monitor" and the handler gets `onitor everything on`. The `commands` stage warns
+  about values a Torch handler compares that also appear in its own words, and lists the ones taking free text. The Torch probe compares what
+  Torch would pass with what was typed on every line it runs, and `behaviour` prints a `TORCH-ARGS` lead when they differ.
 - **GitHub's limit stops Magnetar.** Magnetar fetches its core plugins from GitHub, 60 requests an hour without a token. When it runs out,
   `magnetar` and `legacy` end as `unable to verify` with the time it resets, and `regcheck` as `not run`. Run them again after that.
   `behaviour` waits for the reset by itself. A token avoids this, and `cache/magnetar-github` keeps each game build's downloads, so later
@@ -275,7 +323,8 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
   up. `magnetar` and `legacy` end as `unable to verify`. `behaviour` tries a server 3 times, then reports it as `FAILED`, or lists the
   build in `buildsLeftOut`. A working build that can't be discovered stops the stage as `not run`, and a published one only narrows the comparison.
 - **Load stages prove commands register, not that they work.** Magnetar has no console, and `!help` only runs from in-game chat. `behaviour`
-  runs each command through the probe, within the limits under [Behaviour](#behaviour).
+  runs each command through the probe, within the limits under [Behaviour](#behaviour). Quasar only proves the plugin loads, serves its pages and
+  reaches its settings, and Legacy runs commands only with `"legacy": true` in the target's `behaviour` section.
 - **Torch and Legacy run under Proton.** Proton is not Windows, so a failure is a lead. Confirm it on Windows before calling it
   a plugin defect. `steamcmd`'s Linux `steamclient.so` is linked in for Proton's Steam bridge, so no Steam client or sign-in is
   needed.

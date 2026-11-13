@@ -25,16 +25,16 @@ says only that these scenarios agreed. See README.md for what it cannot prove.
 Servers run side by side, each pinned to its own CORES_PER_SERVER logical cores so they cannot slow each other's timing. How many is worked
 out from what Docker can see. PLUGINCHECK_BEHAVIOUR_WORKERS overrides it, and PLUGINCHECK_BEHAVIOUR_CORES sets the cores each.
 
-PLUGINCHECK_BEHAVIOUR_ONLY limits a run to scenarios containing that text, for working on this stage.
+PLUGINCHECK_BEHAVIOUR_ONLY limits a run to scenarios containing that text, or any of several separated by ||, for working on this stage.
 """
-import concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
+import atexit, concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, fixture, githubtoken, startlog
+import classification, extraplugins, fixture, githubtoken, leases, startlog
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -51,7 +51,10 @@ PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b10'
 TORCH_PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b11'
 START_TIMEOUT = 20 * 60
 IDLE_SECONDS = 120
-COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection')
+# All a plugin can tell about being on a cluster: PluginSdk's PluginCluster.IsClusterProcess reads the first, and PluginStorage the second. One process
+# with these is a cluster node to a plugin, with no gateway or other nodes, and a line that writes the shared folder stands in for another node.
+CLUSTER_NODE = ['-e', 'CLUSTER_NODE_ID=plugincheck', '-e', 'CLUSTER_SHARED_ROOT=/data/shared']
+COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection', 'enabled', 'functional', 'working', 'integrity', 'customData', 'holds')
 # Measured on AutoStation: 16 servers on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
 CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
 # A server settles near 1 GB and peaked at 0.95 GiB when measured. This leaves room for the compile and world load at the start of each one.
@@ -70,7 +73,8 @@ magnetar_cache = None
 
 
 # What a target asks of this stage, all of it optional: legacy (run on MagnetarLegacy too), settleSeconds (wait this long after the
-# world is ready, for a plugin with a warm-up) and removeDuring (commands to run again with things taken out of the world part way through).
+# world is ready, for a plugin with a warm-up), removeDuring (commands to run again with things taken out of the world part way through)
+# and programmableBlocks and shipDrills (add what behaviour/programmable.py and behaviour/drilling.py build to its world).
 options = target.get('behaviour', {})
 
 
@@ -127,11 +131,12 @@ def copy_world_files():
     done = docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '-v', f'{out}:/out', '--entrypoint', 'bash', SDK, '-c',
                   'cp "/ds/Content/CustomWorlds/Empty World/"SANDBOX_0_0_0_.sbs "/ds/Content/CustomWorlds/Empty World/"Sandbox*.sbc /out/ && '
                   'cp "/ds/Content/CustomWorlds/Moon Base/PC/SANDBOX_0_0_0_.sbs" /out/moon.sbs && '
-                  'cp "/ds/Content/CustomWorlds/Moon Base/PC/"*.vx2 /out/')
+                  'cp "/ds/Content/CustomWorlds/Moon Base/PC/"*.vx2 /out/' +
+                  (' && cp /ds/Content/VoxelMaps/Asteroid128-001.vx2 /out/' if options.get('shipDrills') else ''))
     if done.returncode:
         finish('not run', reason='could not copy the game saves the fixture needs: ' + done.stderr[-300:])
     save = os.path.join(work, 'fixture')
-    fixture.build(out, os.path.join(out, 'moon.sbs'), save)
+    fixture.build(out, os.path.join(out, 'moon.sbs'), save, bool(options.get('programmableBlocks')), bool(options.get('shipDrills')))
     return save
 
 
@@ -160,7 +165,7 @@ def build_torch_probe():
     with zipfile.ZipFile(probe_zip, 'w') as z:
         z.write(dll, PROBE + '.dll')
         z.write(os.path.join(here, 'behaviour', 'torchprobe', 'manifest.xml'), 'manifest.xml')
-    shutil.rmtree(libs, ignore_errors=True)
+    # Kept until the other plugins a variant loads are built against them too.
     return probe_zip, None
 
 
@@ -245,7 +250,13 @@ def torch_build(guid):
         print(f'downloading the published {plugin.get("name")} {version} from torchapi.com')
         os.makedirs(cache, exist_ok=True)
         open(path, 'wb').write(get(TORCH_DOWNLOAD + guid, 300))
-    return {'name': 'published-torch', 'host': 'torch', 'zip': path, 'id': guid, 'plugin': plugin.get('name'), 'published': True, 'version': version, 'from': 'torchapi.com'}
+    # The name Torch loads it under is in its own manifest. The listing's title can differ, such as "Ore Yeeter" for OreYeeter.
+    try:
+        with zipfile.ZipFile(path) as package:
+            name = ET.fromstring(package.read('manifest.xml')).findtext('Name').strip()
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, AttributeError):
+        name = plugin.get('name')
+    return {'name': 'published-torch', 'host': 'torch', 'zip': path, 'id': guid, 'plugin': name, 'published': True, 'version': version, 'from': 'torchapi.com'}
 
 
 def published_builds():
@@ -266,14 +277,17 @@ def published_builds():
 def scenario_file(build, batch):
     lines = [f'plugin={build["plugin"]}', f'mode={batch[0].get("mode", "run")}']
     lines += [f'set:{k}={v}' for k, v in batch[0].get('settings', {}).items()]
-    if options.get('settleSeconds') and batch[0].get('mode') != 'discover':
-        lines.append(f"settle={options['settleSeconds']}")
+    settle = batch[0].get('settle') or options.get('settleSeconds')
+    if settle and batch[0].get('mode') != 'discover':
+        lines.append(f'settle={settle}')
+    if any(plan.get('players') for plan in batch):
+        lines.append('players=1')
     for step, plan in enumerate(batch):
         lines += [f"remove={step}|{r['after']}|{r['kind']}|{r['name']}" for r in plan.get('removals', [])]
     for plan in batch:
         # A command read as changing nothing has nothing to wait for.
-        minimum, quiet = (2, 3) if plan.get('readonly') else (plan.get('min', 10), 10)
-        lines.append(f"step={minimum}|{quiet}|{plan.get('command', '')}")
+        minimum, quiet = (2, 3) if plan.get('readonly') and 'min' not in plan else (plan.get('min', 10), 10)
+        lines.append(f"step={minimum}|{quiet}|{plan.get('caller', '')}|{plan.get('command', '')}")
     return '\n'.join(lines) + '\n'
 
 
@@ -283,6 +297,7 @@ def dedicated_config(world_path):
   <SessionSettings>
     <GameMode>Survival</GameMode>
     <OnlineMode>PRIVATE</OnlineMode>
+    <TrashRemovalEnabled>false</TrashRemovalEnabled>
     <MaxPlayers>4</MaxPlayers>
   </SessionSettings>
   <IP>0.0.0.0</IP>
@@ -303,10 +318,18 @@ def seed_magnetar(build, seed, folder):
     probe_folder = os.path.join(folder, 'source', PROBE)
     shutil.copytree(os.path.join(here, 'behaviour', 'probe'), probe_folder)
     name = build['plugin']
-    shutil.copytree(build['source'], os.path.join(folder, 'source', name), ignore=shutil.ignore_patterns('.git', 'bin', 'obj'))
+    shutil.copytree(build['source'], os.path.join(folder, 'source', name), ignore=shutil.ignore_patterns('.claude', '.git', 'bin', 'obj'))
     if magnetar_cache and not legacy:
         shutil.copytree(magnetar_cache, os.path.join(seed, 'Magnetar'), dirs_exist_ok=True)
     plugins = [(build['id'], name, build['manifest']), (PROBE_ID, PROBE, PROBE + '.xml')]
+    # Other plugins a variant loads beside this one, each with its config written before the server starts.
+    for label in build.get('with', []):
+        source_folder, extra_manifest, extra_id, _ = extra[label, 'magnetar']
+        shutil.copytree(source_folder, os.path.join(folder, 'source', label), ignore=shutil.ignore_patterns('.claude', '.git', 'bin', 'obj'))
+        plugins.append((extra_id, label, extra_manifest))
+        spec = options['plugins'][label]['magnetar']
+        if build.get('config', {}).get(label):
+            write(os.path.join(seed, 'Instance', spec['configFile']), extraplugins.config_xml(spec['configRoot'], build['config'][label]))
     dev = ''.join(f'    <LocalFolderConfig>\n      <Id>{escape(i)}</Id>\n      <DebugBuild>false</DebugBuild>\n    </LocalFolderConfig>\n' for i, _, _ in plugins)
     write(os.path.join(seed, 'Magnetar', 'Profiles', 'Current.xml'), f'''<?xml version="1.0"?>
 <Profile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
@@ -338,15 +361,18 @@ def seed_magnetar(build, seed, folder):
 </SourcesConfig>
 ''')
     write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('Z:\\data\\Instance\\Saves\\Fixture' if legacy else '/data/Instance/Saves/Fixture'))
+    # Files a variant writes before start, such as an older config of the plugin under test.
+    for relative, text in build.get('files', {}).items():
+        write(os.path.join(seed, relative), text)
 
 
-def start_magnetar(build, seed, folder, container, volume, cores):
+def start_magnetar(build, seed, folder, container, volume, cores, node=False):
     # Even with Magnetar's downloads cached, each server still asks GitHub for a little, and a run of many servers uses up the anonymous limit.
     token_args, token_env = githubtoken.for_container()
     subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
-                    '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour',
+                    '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour', *(CLUSTER_NODE if node else []),
                     '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
-                    '-v', f'{os.path.join(folder, "source")}:/plugin:ro', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint -consent deny'],
+                    '-v', f'{os.path.join(folder, "source")}:/plugin:ro', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
                    check=True, stdout=subprocess.DEVNULL, env=token_env)
 
 
@@ -362,6 +388,14 @@ def seed_torch(build, seed, folder, probe_zip):
     os.makedirs(plugins)
     shutil.copy(build['zip'], os.path.join(plugins, 'plugin.zip'))
     shutil.copy(probe_zip, plugins)
+    extra_guids = ''
+    for label in build.get('with', []):
+        extra_zip, extra_guid, extra_name = extra[label, 'torch']
+        shutil.copy(extra_zip, os.path.join(plugins, f'{extra_name}.zip'))
+        extra_guids += f'<guid>{escape(extra_guid)}</guid>'
+        spec = options['plugins'][label]['torch']
+        if build.get('config', {}).get(label):
+            write(os.path.join(seed, 'Instance', spec['configFile']), extraplugins.config_xml(spec['configRoot'], build['config'][label]))
     write(os.path.join(seed, 'Torch.cfg'), f'''<?xml version="1.0" encoding="utf-8"?>
 <TorchConfig xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <InstanceName>Instance</InstanceName>
@@ -374,10 +408,12 @@ def seed_torch(build, seed, folder, probe_zip):
   <GetPluginUpdates>false</GetPluginUpdates>
   <EnableAnalytics>false</EnableAnalytics>
   <LocalPlugins>true</LocalPlugins>
-  <Plugins><guid>{escape(build['id'])}</guid><guid>{TORCH_PROBE_ID}</guid></Plugins>
+  <Plugins><guid>{escape(build['id'])}</guid><guid>{TORCH_PROBE_ID}</guid>{extra_guids}</Plugins>
 </TorchConfig>
 ''')
     write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('Z:\\run-data\\Instance\\Saves\\Fixture'))
+    for relative, text in build.get('files', {}).items():
+        write(os.path.join(seed, relative), text)
 
 
 def start_torch(build, seed, folder, container, volume, cores):
@@ -387,13 +423,30 @@ def start_torch(build, seed, folder, container, volume, cores):
 
 
 def run_server(build, batch, save, probe_zip):
+    # An exclusive lease, for a measurement that needs the machine quiet, holds every new server back until it is released.
+    while not lending.may_start():
+        time.sleep(10)
     cores = slots.get()
+    with running_lock:
+        running[0] += 1
     status(kind='server', cores=cores, build=build['name'], scenario=' + '.join(p.get('name', 'discover') for p in batch))
     try:
         return serve(build, batch, save, probe_zip, cores)
     finally:
         status(kind='done', cores=cores)
-        slots.put(cores)
+        with running_lock:
+            running[0] -= 1
+        # A finished server's slot goes to a session waiting to borrow one, or back to the run (README, Lending slots).
+        # Lending.free never raises, and gives None on an error, so the slot stays the run's and serve()'s result stands.
+        try:
+            lease = lending.free(cores)
+        except Exception as error:
+            lending.note('free', error)
+            lease = None
+        if lease:
+            print(f"  lent {cores} to {lease.get('session')} ({lease.get('container')})", flush=True)
+        else:
+            slots.put(cores)
 
 
 def serve(build, batch, save, probe_zip, cores):
@@ -412,7 +465,7 @@ def serve(build, batch, save, probe_zip, cores):
         if build['host'] == 'legacy':
             start_legacy(seed, folder, container, volume, cores)
         else:
-            start_magnetar(build, seed, folder, container, volume, cores)
+            start_magnetar(build, seed, folder, container, volume, cores, any(p.get('node') for p in batch))
         instance, info = '/data/Instance', '/data/Magnetar/info.log'
     else:
         seed_torch(build, seed, folder, probe_zip)
@@ -440,6 +493,11 @@ def serve(build, batch, save, probe_zip, cores):
     docker('cp', f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))
     if magnetar:
         docker('cp', f'{container}:/data/Magnetar/.', os.path.join(folder, 'magnetar'))
+        # The game's own log, where PluginSdk writes a standalone plugin's lines, Debug ones too (MagnetarLogSink). Without the save.
+        game = os.path.join(folder, 'instance')
+        docker('cp', f'{container}:{instance}/.', game)
+        shutil.rmtree(os.path.join(game, 'Saves'), ignore_errors=True)
+        shutil.rmtree(os.path.join(game, 'Backup'), ignore_errors=True)
     else:
         docker('cp', f'{container}:/run-data/Logs/.', os.path.join(folder, 'logs'))
     docker('rm', '-f', '-v', container)
@@ -456,6 +514,8 @@ def serve(build, batch, save, probe_zip, cores):
         shutil.rmtree(os.path.join(folder, 'magnetar', 'DevFolder'), ignore_errors=True)
         shutil.rmtree(os.path.join(folder, 'magnetar', 'GitHub'), ignore_errors=True)
     text = log + read_text(os.path.join(folder, 'container.log')) + ''.join(read_text(p) for p in glob.glob(os.path.join(folder, 'logs', '*.log')))
+    if state != 'recorded':
+        blocked = blocked or startlog.steam_stopped(text)
     mark = build['plugin'].lower()
     lines = sorted({re.sub(r'^\S+ \S+\s*', '', l).strip()[:200] for l in text.splitlines() if mark in l.lower() and re.search(r'convert|error|exception|fail|warn', l, re.I)})
     record = {'build': build['name'], 'state': state, 'seconds': seconds, 'blocked': blocked, 'log': lines[:40]}
@@ -489,7 +549,7 @@ def remember_magnetar_cache(folder):
 def tool_hash():
     """Everything of ours that shapes a result."""
     digest = hashlib.sha256()
-    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py')):
+    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py'), os.path.join('behaviour', 'extraplugins.py')):
         digest.update(open(os.path.join(here, path), 'rb').read())
     for folder in ('probe', 'torchprobe'):
         digest.update(classification.folder_hash(os.path.join(here, 'behaviour', folder)).encode())
@@ -502,6 +562,14 @@ def game_hash(host):
 
 
 def build_hash(build):
+    if build.get('variant'):
+        # A variant runs the same plugin with other plugins and config beside it, or with files laid over it.
+        specs = {label: options.get('plugins', {}).get(label) for label in build.get('with', [])}
+        return hashlib.sha256(json.dumps([base_hash(build), build.get('with'), build.get('config'), specs], sort_keys=True).encode()).hexdigest()[:16]
+    return base_hash(build)
+
+
+def base_hash(build):
     if build['published']:
         return build['version']
     if 'source' in build:
@@ -515,7 +583,8 @@ REPEATS = max(2, int(os.environ.get('PLUGINCHECK_REPEATS', '2')))
 def job_key(build, batch, repeat):
     """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
     parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
-             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals')] for p in batch], options.get('settleSeconds')]
+             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle'), p.get('node')] for p in batch], options.get('settleSeconds'),
+             bool(options.get('programmableBlocks')), bool(options.get('shipDrills'))]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -546,7 +615,7 @@ def run_and_remember_discovery(build):
 
 
 def run_with_retry(build, batch, save, probe_zip):
-    """Magnetar not starting says nothing about the plugin. A rate limit can be waited out, and a dropped download tried again."""
+    """A server that never reached the plugin says nothing about it. A rate limit can be waited out, and a dropped download tried again."""
     attempts = 0
     while True:
         records_here = run_server(build, batch, save, probe_zip)
@@ -561,7 +630,7 @@ def run_with_retry(build, batch, save, probe_zip):
         attempts += 1
         if attempts >= 3:
             return records_here
-        print(f"  Magnetar did not start for {build['name']}, trying again: {record['blocked'][:160]}", flush=True)
+        print(f"  {build['name']} did not start, trying again: {record['blocked'][:160]}", flush=True)
         time.sleep(20)
 
 
@@ -585,13 +654,25 @@ def command_lines(command):
         yield ' '.join([base, *['true'] * len(switches)])
 
 
-def generate(discovered, relevant):
-    """One idle run, then every way to call every command, on its own and with each on/off setting flipped: those it reads, or all with no reading."""
+def generate(discovered, relevant, examples):
+    """One idle run, then every way to call every command, on its own and with each on/off setting flipped: those it reads, or all with no reading.
+    A command with real examples runs those. One without runs with placeholders, which only reach its first check if it takes a value."""
     commands, settings = {}, {}
     for found in discovered.values():
         for command in found.get('commands', []):
-            for line in command_lines(command):
-                commands.setdefault(line.lower(), line)
+            lines = examples.get(command['line'].lower())
+            if lines:
+                for e in lines:
+                    caller = e.get('caller', '')
+                    timing = [f'{k} {e[k]}' for k in ('settle', 'min') if k in e] + [f'{k}={v}' for k, v in sorted(e.get('settings', {}).items())] + (['node'] if e.get('node') else [])
+                    name = e['line'].lower() + (f' as {caller}' if caller else '') + (f" [{', '.join(timing)}]" if timing else '')
+                    commands.setdefault(name, {'command': e['line'], 'caller': caller, 'players': bool(caller or e.get('online')),
+                                               **{k: e[k] for k in ('settle', 'min', 'settings', 'flip', 'node') if k in e}})
+            else:
+                if any(not p['optional'] for p in command['parameters']):
+                    no_example.add(command['line'])
+                for line in command_lines(command):
+                    commands.setdefault(line.lower(), {'command': line, 'caller': '', 'players': False})
         for setting in found.get('settings', []):
             if setting['type'] == 'Boolean':
                 settings.setdefault(setting['name'], str(setting['default'].lower() != 'true').lower())
@@ -599,20 +680,32 @@ def generate(discovered, relevant):
     removing = options.get('removeDuring', {})
     plans += [{'name': f'{line} while removing', 'command': line, 'min': removing.get('minSeconds', 10), 'removals': removing['remove']}
               for line in removing.get('commands', [])]
-    for key, line in sorted(commands.items()):
-        plans.append({'name': key, 'command': line})
-        reads = relevant.get(classification.best_match(line, relevant))
+    for key, call in sorted(commands.items()):
+        flip = call.pop('flip', True)
+        plans.append({'name': key, **call})
+        reads = relevant.get(classification.best_match(call['command'], relevant))
         for name, value in sorted(settings.items()):
-            if reads is None or name in reads:
-                plans.append({'name': f'{key} with {name}={value}', 'command': line, 'settings': {name: value}})
+            if flip and (reads is None or name in reads):
+                plans.append({'name': f'{key} with {name}={value}', **call, 'settings': {**call.get('settings', {}), name: value}})
     only = os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')
-    return [p for p in plans if only.lower() in p['name'].lower()] if only else plans
+    # Several texts, separated by ||, keep scenarios containing any of them.
+    texts = [t.strip().lower() for t in only.split('||') if t.strip()] if only else []
+    return [p for p in plans if any(t in p['name'].lower() for t in texts)] if texts else plans
+
+
+def runs_on(build, plan):
+    """Whether a build runs a scenario: it has what the scenario needs, a variant runs only its own, and only Magnetar on Linux is a cluster node."""
+    # A variant's scenarios: names containing a text, or exactly the name after '='.
+    if build.get('only') and plan.get('name') and not any(plan['name'].lower() == text[1:].lower() if text.startswith('=') else text.lower() in plan['name'].lower()
+                                                          for text in build['only']):
+        return False
+    return fits(discovered[build['name']], plan) and (build['host'] == 'magnetar' or not plan.get('node'))
 
 
 def fits(found, plan):
     """Whether a build has what a scenario needs. A build without a command or setting cannot run it, and that is itself worth reading."""
-    lines = {c['line'].lower() for c in found.get('commands', [])}
-    if plan.get('command') and not any(plan['name'].startswith(l) for l in lines):
+    lines = [c['line'].lower() for c in found.get('commands', [])]
+    if plan.get('command') and not classification.best_match(plan['command'], lines):
         return False
     names = {s['name'] for s in found.get('settings', [])}
     return all(k in names for k in plan.get('settings', {}))
@@ -634,6 +727,15 @@ def differences(first, second):
     return out
 
 
+def replies_of(record):
+    """What a command said, without what always differs: Linux and Windows line endings, and timings and clock times."""
+    out = []
+    for reply in record.get('replies') or []:
+        reply = re.sub(r'\b\d+(\.\d+)?\s?ms\b', '<ms>', reply.replace('\r\n', '\n'))
+        out.append(re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '<time>', reply))
+    return out
+
+
 def touched(record):
     """Real changes to the world. Which grid of a docked pair is the parent can move on its own, so that does not count."""
     return {k: v for k, v in changes(record).items() if k[1] not in ('parent', 'connection')}
@@ -645,7 +747,8 @@ def undeclared(record, known):
     if '*' in writes:
         return []
     found = []
-    if touched(record) and 'grids' not in writes:
+    # A programmable block changes on its own, as scripts run and a plugin's limits catch up with them.
+    if [key for key in touched(record) if not key[0].startswith(('pb:', 'pb-'))] and 'grids' not in writes:
         found.append('grids')
     before, after = record.get('before', {}), record.get('after', {})
     if before.get('identities') != after.get('identities') and 'players' not in writes:
@@ -678,6 +781,34 @@ if docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 
 shutil.rmtree(work, ignore_errors=True)
 os.makedirs(work)
 workers, slots = capacity()
+# Slots other sessions borrowed before this run started stay theirs until they come back.
+all_slots = list(slots.queue)
+lending = leases.Lending(lambda: leases.Owner(all_slots), say=lambda text: print(text, flush=True))
+# On every way out, finish() and a crash too, so other sessions do not wait on a run that has ended.
+atexit.register(lending.stop)
+already_lent = lending.lent_at_start
+if already_lent:
+    kept = [c for c in list(slots.queue) if c not in already_lent]
+    slots = queue.Queue()
+    for c in kept:
+        slots.put(c)
+    print(f"{len(already_lent)} slots are lent to other sessions, so {len(kept)} are this run's for now", flush=True)
+running, running_lock = [0], threading.Lock()
+
+
+def keep_lending():
+    # Lending.beat never raises, and this catch is a second guard: the thread must live, or lent slots never come back.
+    while True:
+        try:
+            for cores in lending.beat(running[0]):
+                print(f'  {cores} came back from a borrower', flush=True)
+                slots.put(cores)
+        except Exception as error:
+            lending.note('keep_lending', error)
+        time.sleep(5)
+
+
+threading.Thread(target=keep_lending, daemon=True).start()
 save = copy_world_files()
 # The magnetar stage has already downloaded what Magnetar needs, so no server here has to ask GitHub for it again.
 # Failing that, what an earlier run kept for this game build.
@@ -690,6 +821,21 @@ for source in (already, kept):
         shutil.copytree(source, os.path.join(magnetar_cache, 'GitHub'))
         break
 builds = working_builds() + published_builds()
+# A target can leave builds out by name, such as a published build known to hang at start.
+if options.get('leaveOut'):
+    print('left out by the target: ' + ', '.join(b['name'] for b in builds if b['name'] in options['leaveOut']))
+    builds = [b for b in builds if b['name'] not in options['leaveOut']]
+
+
+def overlay_copy(base, overlay, name):
+    """The working source with a variant's files laid over it, such as one file as it was at an older commit."""
+    copy = os.path.join(work, f'{name}-source')
+    shutil.copytree(base['source'], copy, dirs_exist_ok=True)
+    shutil.copytree(overlay, copy, dirs_exist_ok=True)
+    return copy
+
+
+builds += extraplugins.variant_builds(builds, options, work, overlay_copy)
 if not builds:
     finish('not run', reason='no build to run: no Magnetar manifest, no Torch zip, and nothing published')
 print('builds: ' + ', '.join(f"{b['name']}" + (f" ({b['version']} from {b['from']})" if b['published'] else '') for b in builds))
@@ -699,20 +845,49 @@ if not any(b['published'] for b in builds):
 probe_zip = None
 if any(b['host'] == 'torch' for b in builds):
     probe_zip, problem = build_torch_probe()
+    # Magnetar compiles the same probe source itself, so a compile error here would also leave every Magnetar server waiting out its time limit.
+    if problem and 'error CS' in problem:
+        finish('not run', reason=problem)
     if problem:
         print(problem)
         builds = [b for b in builds if b['host'] != 'torch']
         if not builds:
             finish('not run', reason=problem)
 
+# Other plugins the variants load, built from source once for the run.
+extra = {}
+for build in builds:
+    for label in build.get('with', []):
+        host = 'torch' if build['host'] == 'torch' else 'magnetar'
+        if (label, host) in extra:
+            continue
+        spec = options.get('plugins', {}).get(label, {}).get(host)
+        try:
+            if spec is None:
+                raise KeyError(f'behaviour.plugins has no {host} entry for it')
+            extra[label, host] = (extraplugins.torch_plugin(spec, cache, work, docker, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch']) if host == 'torch'
+                                  else extraplugins.magnetar_plugin(spec, cache))
+        except (KeyError, OSError, RuntimeError, ET.ParseError) as e:
+            finish('not run', reason=f"{build['name']} needs the plugin {label}, which could not be prepared: {e}")
+        print(f"{label} for {host}: {extra[label, host][-1] if host == 'magnetar' else extra[label, host][2]}, built from {spec['repo']} at {spec.get('commit') or spec.get('ref')}", flush=True)
+
+shutil.rmtree(os.path.join(work, 'torch-libs'), ignore_errors=True)
+
 print('discovering each build', flush=True)
 fingerprints = {b['name']: build_hash(b) for b in builds}
 tools = tool_hash()
 games = {host: game_hash(host) for host in {b['host'] for b in builds}}
 discovered = {}
-for build in builds:
-    known_build = remembered(build, [{'mode': 'discover'}], 0)
-    discovered[build['name']] = (known_build or run_and_remember_discovery(build))[0]
+
+
+def discover(build):
+    return build['name'], (remembered(build, [{'mode': 'discover'}], 0) or run_and_remember_discovery(build))[0]
+
+
+# Side by side: one build that hangs, such as a published build stuck at start, no longer holds up the others.
+with concurrent.futures.ThreadPoolExecutor(max(1, min(workers, len(builds)))) as pool:
+    for name, record in pool.map(discover, builds):
+        discovered[name] = record
 blocked = [r['blocked'] for r in discovered.values() if r.get('blocked')]
 broken = {n: r.get('failed') or r.get('blocked') for n, r in discovered.items() if r.get('failed') or r.get('blocked')}
 for name, reason in broken.items():
@@ -721,15 +896,25 @@ usable = [b for b in builds if b['name'] not in broken]
 if not usable:
     finish('unable to verify' if blocked else 'fail', reason=(blocked or list(broken.values()))[0][:500], discovered=discovered)
 # A working build left out can't be compared, so the servers a run would start are wasted. A published build left out only narrows the comparison.
-working_broken = [b['name'] for b in builds if not b['published'] and b['name'] in broken]
+working_broken = [b['name'] for b in builds if not b['published'] and not b.get('variant') and b['name'] in broken]
 if working_broken:
     finish('not run', reason=f"{', '.join(working_broken)} could not be discovered, so nothing was run: {str(broken[working_broken[0]])[:400]}",
            discovered=discovered, buildsLeftOut=broken)
 
-plans = generate({n: r for n, r in discovered.items() if n not in broken}, classification.settings_read(target['name'], repo))
+no_example = set()
+plans = generate({n: r for n, r in discovered.items() if n not in broken}, classification.settings_read(target['name'], repo), classification.examples(target['name'], repo))
+for line in sorted(no_example):
+    print(f'NO EXAMPLE  {line} takes a value and has no real example, so it only reaches its first check. See classification.py.')
 print(f"{len(plans)} scenarios from {sum(len(r.get('commands', [])) for r in discovered.values())} commands and "
       f"{sum(len(r.get('settings', [])) for r in discovered.values())} settings", flush=True)
 known = classification.load(target['name'], repo)
+if not plans:
+    # A run with nothing to start says nothing, and looks finished. Say why instead.
+    only = os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')
+    why = f"no scenario contains '{only}' (PLUGINCHECK_BEHAVIOUR_ONLY)" if only else 'no scenario was made'
+    if known is None:
+        why += '. There is no current reading of the commands, so scenarios come only from their bare names: the source changed since the reading, or the commands stage did not run'
+    finish('not run', reason=why, discovered=discovered, buildsLeftOut=broken)
 if known is None:
     print('No current AI reading of these commands, so each one gets its own server. See the CLASSIFY lines from the commands stage.')
 else:
@@ -739,7 +924,7 @@ skipped = []
 for build in usable:
     fitting = []
     for plan in plans:
-        if fits(discovered[build['name']], plan):
+        if runs_on(build, plan):
             fitting.append(plan)
         else:
             skipped.append({'build': build['name'], 'scenario': plan['name']})
@@ -783,14 +968,14 @@ def compare(plan):
             continue
         found = [{'scenario': plan['name'], 'grid': grid, 'field': field, first.replace('-', '_'): left, second.replace('-', '_'): right,
                   'between': [first, second], 'unstable': (plan['name'], grid, field) in unstable} for (grid, field), (left, right) in disagreements(a, b).items()]
-        if a.get('replies') != b.get('replies'):
+        if replies_of(a) != replies_of(b):
             found.append({'scenario': plan['name'], 'grid': '', 'field': 'replies', first.replace('-', '_'): a.get('replies'), second.replace('-', '_'): b.get('replies'), 'between': [first, second], 'unstable': False})
         for d in found:
             left, right = d['between']
             print(f"{'UNSTABLE' if d['unstable'] else 'DIFF'}  {d['scenario']}  {d['grid']} {d['field']}: {left}={d[left.replace('-', '_')]}  {right}={d[right.replace('-', '_')]}")
         real.extend(found)
     done = [r for (_, s, _), r in records.items() if s == plan['name'] and 'after' in r]
-    if done and not any(changes(r) for r in done):
+    if done and not any(changes(r) for r in done) and plan['name'] not in quiet:
         quiet.append(plan['name'])
 
 
@@ -802,13 +987,35 @@ by_name = {p['name']: p for p in plans}
 after_stage = int(os.environ.get('PLUGINCHECK_SECONDS_AFTER', '0'))
 started = time.time()
 wrongly_classified = {}
+not_handled = {}
+UNHANDLED = 'the command was not handled'
+WRONG_ARGUMENTS = 'PluginCheck: Torch passed '
+wrong_arguments = {}
+
+
+def note_arguments(record):
+    """Moves what the Torch probe said about a command's arguments out of its replies, so only the plugin's words are compared."""
+    replies = record.get('replies') or []
+    said = [r for r in replies if r.startswith(WRONG_ARGUMENTS)]
+    if not said:
+        return
+    record['replies'] = [r for r in replies if not r.startswith(WRONG_ARGUMENTS)]
+    record['wrongArguments'] = said[0]
+    if record['scenario'] not in wrong_arguments:
+        wrong_arguments[record['scenario']] = said[0]
+        print(f"LEAD  TORCH-ARGS  {record['scenario']}: {said[0]}. Read this reply: the handler did not get what was typed.", flush=True)
 
 
 def take(build, repeat, results):
     """Stores what one server recorded, and posts whatever that finishes."""
     for record in results:
         name = record['scenario']
+        note_arguments(record)
         records[build['name'], name, repeat] = record
+        # A build was only given a command it has, so this is a line the probe got wrong, and matching builds would otherwise hide it.
+        if UNHANDLED in (record.get('replies') or []) and name not in not_handled.setdefault(build['name'], []):
+            not_handled[build['name']].append(name)
+            print(f"FAILED  {build['name']}  {name} never ran: {UNHANDLED}", flush=True)
         if record.get('failed') or record.get('state') != 'recorded':
             failure = {'build': build['name'], 'scenario': name, 'reason': str(record.get('failed') or record.get('blocked') or record.get('state'))[:400]}
             failures.append(failure)
@@ -824,9 +1031,11 @@ def take(build, repeat, results):
 for (build, batch, repeat), results in kept_results:
     take(build, repeat, results)
 
+finished = 0
 with concurrent.futures.ThreadPoolExecutor(workers) as pool:
     futures = {pool.submit(run_and_remember, b, batch, r): (b, batch, r) for b, batch, r in jobs}
     for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
+        finished = done
         build, batch, repeat = futures[future]
         results = future.result()
         elapsed = time.time() - started
@@ -842,13 +1051,29 @@ later = {r['scenario'] for r in records.values() if r.get('sharedAfter')}
 suspect = ({d['scenario'] for d in real} & later) | set(wrongly_classified)
 if suspect:
     print(f'{len(suspect)} scenarios that shared a server showed a difference, so they rerun alone before anything is reported', flush=True)
-    again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if fits(discovered[b['name']], by_name[n]) for r in range(REPEATS)]
+    again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if runs_on(b, by_name[n]) for r in range(REPEATS)]
+    # They join the count, so the progress never says done while these still run.
+    total = len(jobs) + len(again)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        futures = {pool.submit(run_and_remember, b, [p], r): (b, r) for b, p, r in again}
+        futures = {pool.submit(run_and_remember, b, [p], r): (b, r, p['name']) for b, p, r in again}
         for future in concurrent.futures.as_completed(futures):
-            build, repeat = futures[future]
+            build, repeat, alone = futures[future]
+            finished += 1
+            elapsed = time.time() - started
+            left = (total - finished) * elapsed / max(finished, 1)
+            status(kind='progress', done=finished, total=total, left=int(left), overall=int(left + after_stage), failed=len(failures))
+            print(f"[{finished}/{total} {finished * 100 // total}%] {clock(left)} left here, {clock(left + after_stage)} left overall  |  "
+                  f"{build['name']}  alone: {alone}", flush=True)
             for record in future.result():
-                records[build['name'], record['scenario'], repeat] = record
+                note_arguments(record)
+                key = build['name'], record['scenario'], repeat
+                # A rerun that never finished says nothing about the command, and the result it would replace does.
+                if record.get('state') == 'recorded' or key not in records:
+                    records[key] = record
+                reason = record.get('failed') or record.get('blocked') or (None if record.get('state') == 'recorded' else record.get('state'))
+                if reason:
+                    failures.append({'build': build['name'], 'scenario': record['scenario'], 'reason': f'alone: {reason}'[:400]})
+                    print(f"FAILED  {build['name']}  {record['scenario']} did not finish alone, so its difference was not settled: {str(reason)[:200]}", flush=True)
     real[:] = [d for d in real if d['scenario'] not in suspect]
     unstable_kept = {k: v for k, v in unstable.items() if k[0] not in suspect}
     unstable.clear()
@@ -857,12 +1082,20 @@ if suspect:
         compare(by_name[name])
 
 json.dump([dict(r) for r in records.values()], open(os.path.join(run_dir, 'behaviour-records.json'), 'w', encoding='utf-8'), indent=1)
+# What every command said, for reading. Nothing here can tell a command that did its work from one that stopped at its first check. A person or an AI can.
+said = {}
+for (name, scenario, _), record in sorted(records.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+    text = ' | '.join(replies_of(record))[:3000 if options.get('programmableBlocks') else 300].replace('\n', ' ')
+    said.setdefault(scenario, {}).setdefault(name, f"[{record['wrongArguments']}] {text}" if 'wrongArguments' in record else text)
+write(os.path.join(run_dir, 'behaviour-replies.txt'), ''.join(f'{scenario}\n' + ''.join(f'  {name}: {text}\n' for name, text in builds.items()) for scenario, builds in said.items()))
 
-print(f"{len(records)} results, {len(failures)} failed, {len(real)} differences, {sum(d['unstable'] for d in real)} of them unstable, "
-      f"{len(quiet)} of {len(plans)} scenarios changed nothing in the world")
+unhandled = sum(len(v) for v in not_handled.values())
+print(f"{len(records)} results, {len(failures)} failed, {unhandled} never ran, {len(no_example)} commands with no example, {len(real)} differences, "
+      f"{sum(d['unstable'] for d in real)} of them unstable, {len(quiet)} of {len(plans)} scenarios changed nothing in the world")
+print('Results say a server finished. To know how far each command got, read behaviour-replies.txt.')
 print('Each difference is a lead: it says two builds disagree, not which is right. No differences would say only that these scenarios agreed.')
 crashed = any('stack' in f['reason'].lower() for f in failures)
-finish('fail' if crashed else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
-       servers=len(jobs), reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
-       noChange=quiet, skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
+finish('fail' if crashed or unhandled else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
+       servers=len(jobs), aloneReruns=len(again) if suspect else 0, reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
+       noChange=quiet, wrongArguments=wrong_arguments, notHandled=not_handled, noExample=sorted(no_example), skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
        note='A difference is a lead. No differences proves nothing beyond these scenarios.')

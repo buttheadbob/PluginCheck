@@ -19,7 +19,8 @@ import json, os, re, shutil, subprocess, sys, time
 VERSIONS = ['1.4.1.1', 'latest']
 TEST_ADMIN = '76561190000000000'
 TIMEOUT = 10 * 60
-SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -29,7 +30,7 @@ conf = target['quasar']
 source = os.path.join(run_dir, 'quasar-source', name)
 data = os.path.join(run_dir, 'quasar-data')
 
-shutil.copytree(target['repo'], source, ignore=SKIP)
+shutil.copytree(target['repo'], source, ignore=repocopy.ignore(target['repo']))
 os.makedirs(data, exist_ok=True)
 package = json.load(open(os.path.join(source, conf['packageManifest']), encoding='utf-8'))
 project = package['projectPath']

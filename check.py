@@ -24,6 +24,7 @@ STAGES = {
     'threads': 'stages/threads.py',
     'commands': 'stages/commands.py',
     'nulls': 'stages/nulls.py',
+    'storage': 'stages/storage.py',
     'hostpackages': 'stages/hostpackages.py',
     # Run a real server. Magnetar alone, Quasar and Torch must never share data or a server install.
     'magnetar': 'stages/magnetar.py',
@@ -45,12 +46,12 @@ DEPENDS = {
 # Anything that can be checked without a running server goes first, so a problem they find costs no server time.
 HOST_STAGES = ('manifest', 'scan', 'policy', 'similar', 'copies', 'dependencies', 'inherited')
 # These read the game's assemblies, so they need a server installed, and that is all they need.
-CODE_STAGES = ('lint', 'reflection', 'threads', 'commands', 'nulls', 'hostpackages')
+CODE_STAGES = ('lint', 'reflection', 'threads', 'commands', 'nulls', 'storage', 'hostpackages')
 # Answer only from the plugin's files, the game and PluginCheck's own code, so the same inputs give the same result. dependencies is not here,
 # because new advisories appear with no change to the plugin.
-REUSABLE = ('manifest', 'scan', 'policy', 'lint', 'reflection', 'threads', 'commands', 'nulls', 'hostpackages')
+REUSABLE = ('manifest', 'scan', 'policy', 'lint', 'reflection', 'threads', 'commands', 'nulls', 'storage', 'hostpackages')
 # The tool folder behind each stage, which counts as part of what it is.
-STAGE_TOOLS = {'reflection': ['reflectcheck'], 'threads': ['threadcheck', 'threadcatalog'], 'commands': ['commandcheck'], 'nulls': ['nullcheck']}
+STAGE_TOOLS = {'reflection': ['reflectcheck'], 'threads': ['threadcheck', 'threadcatalog'], 'commands': ['commandcheck'], 'nulls': ['nullcheck'], 'storage': ['storagecheck']}
 SERVER_STAGES = ('magnetar', 'legacy', 'quasar', 'quasar_managed', 'torch')
 # Not worth starting once lint has found a compile error.
 STOPPED_BY_LINT = (*SERVER_STAGES, 'regcheck', 'behaviour')
@@ -58,7 +59,7 @@ STOPPED_BY_LINT = (*SERVER_STAGES, 'regcheck', 'behaviour')
 ALONE = 'behaviour'
 # Reads every log the others wrote.
 LAST = 'logcheck'
-NEEDS_DIR = {'similar', 'copies', 'magnetar', 'legacy', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'behaviour', 'inherited', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'hostpackages', 'lint', 'logcheck'}
+NEEDS_DIR = {'similar', 'copies', 'magnetar', 'legacy', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'behaviour', 'inherited', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'storage', 'hostpackages', 'lint', 'logcheck'}
 
 parser = argparse.ArgumentParser()
 parser.add_argument('target')
@@ -169,7 +170,7 @@ def time_left():
     return max((seconds_from(s) for s in planned if s not in finished_stages), default=0)
 
 
-display = Display(target['name'], planned, past, time_left)
+display = Display(target['name'], planned, past, time_left, run_dir)
 refused = githubtoken.check()
 if refused:
     display.line('WARN  ' + refused)

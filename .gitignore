@@ -2,6 +2,8 @@
 runs/
 # Downloads, kept results and the AI's reading of commands. See README.md
 cache/
+# Slot leases shared with other sessions. See README.md
+machine/
 __pycache__/
 # A GitHub token. See stages/githubtoken.py
 github-token.txt

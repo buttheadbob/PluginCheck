@@ -8,12 +8,18 @@ using System.Reflection;
 using System.Text;
 using Sandbox.Engine.Physics;
 using Sandbox.Game.Entities;
+using Sandbox.Game.Entities.Blocks;
+using Sandbox.Game.Entities.Cube;
 using Sandbox.Game.GameSystems;
+using Sandbox.Game.GameSystems.BankingAndCurrency;
 using Sandbox.Game.Multiplayer;
+using Sandbox.Game.Screens.Helpers;
 using Sandbox.Game.World;
 using VRage;
 using VRage.FileSystem;
+using VRage.Game;
 using VRage.Game.Entity;
+using VRage.Game.ModAPI;
 using VRage.Utils;
 using VRageMath;
 
@@ -36,12 +42,21 @@ public sealed class Removal
     public bool Done;
 }
 
+/// <summary>The online player a command runs as. With none, it runs as the server's console.</summary>
+public sealed class Caller
+{
+    public ulong SteamId;
+    public long IdentityId;
+    public string Name = "";
+    public MyPromoteLevel Level;
+}
+
 /// <summary>What differs between hosts: the plugin's commands, and how to run one.</summary>
 public interface IProbeHost
 {
     object? FindPlugin(string name);
     IEnumerable<CommandInfo> Commands(object plugin);
-    List<string> Run(string line);
+    List<string> Run(string line, Caller? caller);
 }
 
 /// <summary>Discovers a plugin, or runs its scenarios in turn and records the world before and after each. Everything here runs on the
@@ -50,12 +65,16 @@ public sealed class ProbeCore
 {
     private const int CheckTicks = 60;
     private const int ProbePlayerSerial = 77;
+    private const ulong CallerSteamId = 76561190000000003;
+    private const ulong TargetSteamId = 76561190000000004;
 
     private readonly IProbeHost _host;
     private string _mode = "";
     private string _pluginName = "";
     private int _maxSeconds = 600;
-    private readonly List<(string Command, int MinSeconds, int QuietChecks)> _steps = new();
+    private readonly List<(string Command, int MinSeconds, int QuietChecks, string Caller)> _steps = new();
+    private bool _addPlayers;
+    private MyPlayer? _callerPlayer;
     private readonly List<string> _results = new();
     private readonly List<Removal> _removals = new();
     private readonly List<string> _removed = new();
@@ -66,7 +85,11 @@ public sealed class ProbeCore
     private object? _plugin;
     private string _before = "";
     private string _last = "";
-    private List<string> _replies = new();
+    private readonly List<List<string>> _replies = new();
+    private readonly Queue<string> _lines = new();
+    // The caller, for probe lines that act as them.
+    private static MyPlayer? _seated;
+    private int _resumeAt;
     private readonly List<string> _settingsApplied = new();
     private int _ticks;
     private int _startedAt = -1;
@@ -142,7 +165,41 @@ public sealed class ProbeCore
             return;
         }
 
+        if (_addPlayers)
+        {
+            _callerPlayer = OnlinePlayer(CallerSteamId, "ProbeCaller");
+            _seated = _callerPlayer;
+            OnlinePlayer(TargetSteamId, "ProbeTarget");
+        }
+
         Begin(Record());
+    }
+
+    // No real client can join a test server, so a client is made up. Replies never reach it, and the hosts capture them instead.
+    private static MyPlayer OnlinePlayer(ulong steamId, string name)
+    {
+        Sync.Clients.AddClient(steamId, name);
+        // A saved player keeps its identity, because blocks in the world belong to it.
+        long saved = MySession.Static.Players.TryGetIdentityId(steamId);
+        MyIdentity identity = saved != 0 ? MySession.Static.Players.TryGetIdentity(saved) : MySession.Static.Players.CreateNewIdentity(name);
+        MyPlayer player = MySession.Static.Players.CreateNewPlayer(identity, new MyPlayer.PlayerId(steamId, 0), name, true, false, true);
+        MyBankingSystem.Static.CreateAccount(identity.IdentityId);
+        // Clear of every grid in the fixture, whose first row starts at 1000, 1000, 1000.
+        player.SpawnAt(MatrixD.CreateWorld(new Vector3D(1000, 1400, 1000 + (long)(steamId % 10) * 20)), Vector3.Zero, null, null);
+        return player;
+    }
+
+    private Caller? CallerFor(string level)
+    {
+        if (level.Length == 0)
+            return null;
+        // Running this as the console instead would pass every permission check, and look like a test of them.
+        if (_callerPlayer == null)
+            throw new InvalidOperationException("a scenario asked for a " + level + " caller, but no player was added");
+        MyPromoteLevel promote = level == "admin" ? MyPromoteLevel.Admin : MyPromoteLevel.None;
+        // Written directly, because SetUserPromoteLevel only tells clients, and there are none.
+        MySession.Static.PromotedUsers[CallerSteamId] = promote;
+        return new Caller { SteamId = CallerSteamId, IdentityId = _callerPlayer.Identity.IdentityId, Name = _callerPlayer.DisplayName, Level = promote };
     }
 
     private void Begin(string before)
@@ -152,16 +209,112 @@ public sealed class ProbeCore
         _removed.Clear();
         if (_removals.Any(removal => removal.Step == _step && removal.Kind == "player"))
             AddPlayer();
-        _replies = command.Length > 0 ? _host.Run(command) : new List<string>();
+        _replies.Clear();
+        foreach (string line in command.Split(new[] { " && " }, StringSplitOptions.RemoveEmptyEntries))
+            _lines.Enqueue(line);
+        RunLines();
         _last = "";
         _quiet = 0;
         _startedAt = _ticks;
     }
 
+    private void RunLines()
+    {
+        while (_lines.Count > 0)
+        {
+            string line = _lines.Dequeue();
+            if (line.StartsWith("probe:wait ", StringComparison.Ordinal))
+            {
+                _resumeAt = _ticks + int.Parse(line.Substring("probe:wait ".Length), CultureInfo.InvariantCulture) * 60;
+                return;
+            }
+            _replies.Add(line.StartsWith("probe:", StringComparison.Ordinal) ? new List<string> { TryProbeAction(line) } : _host.Run(line, CallerFor(_steps[_step].Caller)));
+        }
+    }
+
+    // A build that has no shared folder, such as one from before a plugin supported clusters, says so in its replies, and the scenario carries on.
+    private static string TryProbeAction(string line)
+    {
+        try
+        {
+            return ProbeAction(line);
+        }
+        catch (Exception e)
+        {
+            return line + ": failed, " + e.GetType().Name + ": " + e.Message;
+        }
+    }
+
+    // What a client, an autosave or another node does, which a scenario has no other way to cause.
+    private static string ProbeAction(string line)
+    {
+        string[] words = line.Split(new[] { ' ' }, 3);
+        switch (words[0])
+        {
+            case "probe:empty":
+                foreach (MyTerminalBlock watched in Watched())
+                    watched.GetInventory()?.Clear();
+                return line + ": done";
+            case "probe:fill":
+                var ore = new MyObjectBuilder_Ore { SubtypeName = words[2].Split(' ')[0] };
+                Watched().First(b => b.CustomName.ToString() == words[1]).GetInventory().AddItems(int.Parse(words[2].Split(' ')[1], CultureInfo.InvariantCulture), ore);
+                return line + ": done";
+            case "probe:sharedwrite":
+                string path = Path.Combine(SharedFolder(), words[1]);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, words[2]);
+                return line + ": done";
+            case "probe:off":
+                MyFunctionalBlock off = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyFunctionalBlock>()).First(b => b.CustomName.ToString() == words[1]);
+                off.Enabled = false;
+                return line + ": " + (off.Enabled ? "still on" : "off");
+            case "probe:file":
+                // A file under the server's user data folder, such as a plugin's config, as it is now.
+                string read = Path.Combine(MyFileSystem.UserDataPath, string.Join(" ", words.Skip(1)));
+                return line + ": " + (File.Exists(read) ? File.ReadAllText(read).Replace("\r", "").Replace("\n", " ") : "(no file)");
+            case "probe:storage":
+                MyProgrammableBlock stored = ProgrammableBlocks().First(b => b.CustomName.ToString() == words[1]);
+                return line + ": " + (typeof(MyProgrammableBlock).GetField("m_storageData", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(stored) ?? "(none)");
+            case "probe:sit":
+                MyCockpit cockpit = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyCockpit>()).First(c => c.CustomName.ToString() == words[1]);
+                cockpit.AttachPilot(_seated?.Character ?? throw new InvalidOperationException("no caller to seat"), 0);
+                return line + ": " + (cockpit.Pilot != null ? "seated" : "not seated");
+            case "probe:sharedread":
+                return line + ": " + File.ReadAllText(Path.Combine(SharedFolder(), words[1]));
+            case "probe:sharedremove":
+                Directory.Delete(Path.Combine(SharedFolder(), words[1]), true);
+                return line + ": done";
+        }
+
+        if (line == "probe:save")
+        {
+            MyAsyncSaving.Start();
+            return line + ": ServerSaving=" + Lower(MySession.Static.ServerSaving);
+        }
+        string name = line.Substring("probe:recompile ".Length);
+        MyProgrammableBlock block = ProgrammableBlocks().First(b => b.CustomName.ToString() == name);
+        typeof(MyProgrammableBlock).GetMethod("Recompile", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(block, new object[] { true });
+        return line + ": done";
+    }
+
+    private static string SharedFolder() => Directory.GetDirectories(Path.Combine(Environment.GetEnvironmentVariable("CLUSTER_SHARED_ROOT")!, "plugins")).Single();
+
+    private static List<MyTerminalBlock> Watched() =>
+        MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyTerminalBlock>()).Where(b => b.CustomName.ToString().StartsWith("watch-", StringComparison.Ordinal)).ToList();
+
+    private static List<MyProgrammableBlock> ProgrammableBlocks() =>
+        MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyProgrammableBlock>()).ToList();
+
     // Waits for the world to stop changing, since nothing says when a plugin has finished.
     private void Watch()
     {
         RemoveWhatIsDue();
+        if (_lines.Count > 0)
+        {
+            if (_ticks >= _resumeAt)
+                RunLines();
+            return;
+        }
         if ((_ticks - _startedAt) % CheckTicks != 0)
             return;
         string now = Record();
@@ -176,7 +329,7 @@ public sealed class ProbeCore
 
     private void Conclude(string after, string ended)
     {
-        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.Select(Quote)) + "],\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
+        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.SelectMany(lines => lines).Select(Quote)) + "],\"scripts\":" + Scripts() + ",\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
         _step++;
         if (_step < _steps.Count)
         {
@@ -270,9 +423,10 @@ public sealed class ProbeCore
             else if (key == "plugin") _pluginName = value;
             else if (key == "step")
             {
-                string[] parts = value.Split(new[] { '|' }, 3);
-                _steps.Add((parts[2], int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture)));
+                string[] parts = value.Split(new[] { '|' }, 4);
+                _steps.Add((parts[3], int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture), parts[2]));
             }
+            else if (key == "players") _addPlayers = value == "1";
             else if (key.StartsWith("set:", StringComparison.Ordinal)) _settings[key.Substring(4)] = value;
         }
     }
@@ -303,7 +457,7 @@ public sealed class ProbeCore
         {
             if (!_settings.TryGetValue(setting.Name, out string? text))
                 continue;
-            object value = Convert.ChangeType(text, setting.PropertyType, CultureInfo.InvariantCulture);
+            object value = setting.PropertyType.IsEnum ? Enum.Parse(setting.PropertyType, text) : Convert.ChangeType(text, setting.PropertyType, CultureInfo.InvariantCulture);
             setting.SetValue(owner, value);
             _settingsApplied.Add(setting.Name + "=" + text);
         }
@@ -336,6 +490,10 @@ public sealed class ProbeCore
                 name = (grid.DisplayName ?? "") + "#" + i;
             grids[name] = Describe(grid);
         }
+        foreach (MyProgrammableBlock block in ProgrammableBlocks())
+            grids["pb:" + block.CustomName] = DescribeBlock(block);
+        foreach (MyTerminalBlock block in Watched())
+            grids["pb:" + block.CustomName] = "{\"enabled\":" + Lower((block as MyFunctionalBlock)?.Enabled ?? true) + ",\"holds\":" + Quote(Holds(block)) + "}";
         int others = MyEntities.GetEntities().Count(e => e is not MyCubeGrid);
         return "{\"grids\":{" + string.Join(",", grids.Select(g => Quote(g.Key) + ":" + g.Value)) + "},\"otherEntities\":" + others
             + ",\"identities\":" + MySession.Static.Players.GetAllIdentities().Count + ",\"factions\":" + MySession.Static.Factions.Count() + "}";
@@ -349,6 +507,29 @@ public sealed class ProbeCore
             + ",\"owners\":" + Quote(string.Join(",", grid.BigOwners ?? new List<long>())) + ",\"parent\":" + Quote(parent?.DisplayName ?? "")
             + ",\"connection\":" + Quote(connection?.GetType().Name ?? "")
             + ",\"inGravity\":" + Lower(!Vector3D.IsZero(MyGravityProviderSystem.CalculateNaturalGravityInPoint(grid.PositionComp.GetPosition()))) + "}";
+    }
+
+    // Names only: an amount would change on every check, and the world would never count as settled.
+    private static string Holds(MyTerminalBlock block) =>
+        string.Join(",", (block.GetInventory()?.GetItems() ?? new List<MyPhysicalInventoryItem>()).Select(item => item.Content.SubtypeName).Distinct().OrderBy(name => name, StringComparer.Ordinal));
+
+    private static string DescribeBlock(MyProgrammableBlock block)
+    {
+        return "{\"enabled\":" + Lower(block.Enabled) + ",\"functional\":" + Lower(block.IsFunctional) + ",\"working\":" + Lower(block.IsWorking)
+            + ",\"integrity\":" + ((int)block.SlimBlock.Integrity).ToString(CultureInfo.InvariantCulture) + ",\"customData\":" + Quote(block.CustomData ?? "") + "}";
+    }
+
+    // What each script is doing. Not in Record, which is how the world counts as settled, because this changes on every run.
+    private static string Scripts()
+    {
+        const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+        return "{" + string.Join(",", ProgrammableBlocks().Select(block =>
+        {
+            bool running = typeof(MyProgrammableBlock).GetField("m_instance", Private)!.GetValue(block) != null;
+            object reason = typeof(MyProgrammableBlock).GetField("m_terminationReason", Private)!.GetValue(block)!;
+            string info = block.DetailedInfo.ToString();
+            return Quote(block.CustomName.ToString()) + ":" + Quote((running ? "running " : "no script ") + reason + " " + (info.Length > 300 ? info.Substring(0, 300) : info));
+        })) + "}";
     }
 
     private static string Quote(string text)

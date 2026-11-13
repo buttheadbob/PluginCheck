@@ -6,7 +6,7 @@ import collections, json, os, re, sys
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 repo = target['repo']
-SKIP = {'.git', 'bin', 'obj', 'node_modules', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'node_modules', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs'}
 TEXT = ('.cs', '.razor', '.cshtml', '.xaml', '.csproj', '.projitems', '.props', '.targets', '.ps1', '.bat', '.cmd',
         '.sh', '.js', '.json', '.xml', '.yml', '.yaml', '.md', '.config')
 BINARY = ('.dll', '.exe', '.so', '.dylib', '.pdb', '.zip', '.7z', '.rar', '.nupkg', '.bin')

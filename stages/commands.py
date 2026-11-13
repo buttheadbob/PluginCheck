@@ -64,13 +64,17 @@ if target.get('torch', {}).get('project'):
     folders.append(os.path.dirname(target['torch']['project']) or '.')
     if os.path.isdir(os.path.join(repo, 'Shared')) and 'Shared' not in folders:
         folders.append('Shared')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
+folders += [f for f in repocopy.companion_folders(repo, target) if f not in folders]
 if not folders:
-    finish('not run', reason='needs a Magnetar manifest or a Torch project to know which source to read')
+    finish('not run', reason='needs a Magnetar manifest, a Torch project or a Quasar companion to know which source to read')
 
 source = os.path.join(work, 'source')
-skip = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries')
+skip = shutil.ignore_patterns('.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries')
 for folder in folders:
     shutil.copytree(os.path.join(repo, folder), os.path.join(source, folder), ignore=skip, dirs_exist_ok=True)
+repocopy.add_implicit_usings(repo, folders, source)
 listed = ['/work/source/' + os.path.relpath(os.path.join(d, f), source).replace(os.sep, '/')
           for d, _, fs in os.walk(source) for f in fs if f.endswith('.cs')]
 open(os.path.join(work, 'sources.txt'), 'w', encoding='utf-8', newline='\n').write('\n'.join(listed))
@@ -153,13 +157,27 @@ for name, same in sorted(named_only.items()):
         text = f"{typed(x)} ({name}#L{x['line']}-L{x['endLine']}) takes a player, but no data was traced from it. Read what it shows them."
         warnings.append(text)
         print('CHECK ' + text)
+# Torch finds a command's arguments with IndexOf over the whole line, so a value that is also in the command's own words starts too early.
+for x in report.get('torchArguments', []):
+    x['file'] = x['file'].replace('/work/source/', '')
+    line = f"{x['command'][1:]} {x['value']}"
+    text = (f"{x['command']} {x['value']} ({os.path.basename(x['file'])}#L{x['line']}): Torch finds arguments by searching the whole line, so '{x['value']}' is found in the "
+            f"command's own words and the handler gets '{line[line.lower().find(x['value'].lower()):]}'. A handler that reads its first word never sees '{x['value']}'.")
+    warnings.append(text)
+    print('WARN  ' + text)
+if report.get('torchFreeText'):
+    text = (f"These Torch commands take free text, and any value that also appears in their own words reaches them with those words in front of it. Check what each does "
+            f"with that: {', '.join(sorted(report['torchFreeText']))}")
+    warnings.append(text)
+    print('CHECK ' + text)
 report['warnings'] = warnings
 for x in report['everyCommand']:
     x['file'] = x['file'].replace('/work/source/', '')
 classified = classification.load(target['name'], repo)
 if classified is None:
     print(f"CLASSIFY  No current reading of these commands, so each one gets its own server. Read every handler below, then write "
-          f"{classification.path_for(target['name'])} with source {classification.source_hash(repo)}. See stages/classification.py.")
+          f"{classification.path_for(target['name'])} with source {classification.source_hash(repo)}, with real examples for every command "
+          f"that takes a value. See stages/classification.py.")
     for x in sorted(report['everyCommand'], key=lambda v: v['command'].lower()):
         print(f"CLASSIFY  {x['command']}  ({x['file']}:{x['line']})")
 else:

@@ -30,7 +30,8 @@ TIMEOUT = 30 * 60
 HOLD = os.environ.get('PLUGINCHECK_HOLD') == '1'
 WORLD = os.environ.get('PLUGINCHECK_WORLD')
 UI_PORT = 18080
-SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -44,11 +45,12 @@ work = os.path.join(run_dir, 'managed')
 source = os.path.join(work, 'plugins', name)
 seed = os.path.join(work, 'seed')
 os.makedirs(os.path.join(work, 'plugins'))
-shutil.copytree(repo, source, ignore=SKIP)
+shutil.copytree(repo, source, ignore=repocopy.ignore(repo))
 package = json.load(open(os.path.join(source, conf['packageManifest']), encoding='utf-8')) if conf else {}
 companions = [c for c in package.get('companionPlugins', []) if isinstance(c, dict)]
-manifest = target['magnetar']['manifest']
-plugin_id = ET.parse(os.path.join(repo, manifest)).getroot().findtext('Id').strip()
+# A Quasar UI plugin with no Magnetar plugin of its own has its game side in its owned companions, which Quasar deploys itself.
+manifest = target['magnetar']['manifest'] if 'magnetar' in target else None
+plugin_id = ET.parse(os.path.join(repo, manifest)).getroot().findtext('Id').strip() if manifest else None
 
 
 def docker(*args):
@@ -113,11 +115,11 @@ def wait(container, ready, seconds=TIMEOUT):
 
 # Seed the files the Quasar UI would write.
 write(os.path.join(seed, 'dev-folders.json'), [{
-    'name': name, 'folderPath': f'/plugins/{name}', 'dataFile': manifest, 'pluginId': plugin_id, 'debugBuild': False}])
+    'name': name, 'folderPath': f'/plugins/{name}', 'dataFile': manifest, 'pluginId': plugin_id, 'debugBuild': False}] if manifest else [])
 write(os.path.join(seed, 'ConfigProfiles', SERVER, 'profile.json'), {
     'configProfileId': SERVER, 'name': 'PluginCheck',
     'sessionSettings': {'onlineMode': 1},
-    'plugins': [{'pluginId': plugin_id, 'displayName': name}], 'mods': [], 'offeredDefaultPlugins': []})
+    'plugins': [{'pluginId': plugin_id, 'displayName': name}] if plugin_id else [], 'mods': [], 'offeredDefaultPlugins': []})
 write(os.path.join(seed, 'Magnetars', SERVER, 'server.json'), {
     'uniqueName': SERVER, 'displayName': 'PluginCheck', 'inGameServerName': f'PluginCheck {name}', 'inGameWorldName': 'PluginCheck',
     'goalState': 1, 'autoStart': True, 'configProfileId': SERVER, 'worldSaveName': 'World', 'worldTemplateId': '', 'serverPort': 27016})
@@ -160,12 +162,24 @@ copy_world = '' if WORLD else f'cp -r "{DS}/Content/CustomWorlds/Star System/." 
 build = [f'set -e; mkdir -p "{world}"; {copy_world}cd "/plugins/{name}"']
 if package:
     build.append(f'dotnet build "{package["projectPath"]}" -c Release -v:minimal -p:QuasarPluginAbstractionsAssembly=/opt/quasar/Quasar.Plugin.Abstractions.dll -p:DeployToQuasar=false')
+# As Quasar's own installer does (QuasarUiPluginHubCatalogService.cs:580-605): the protocol, DS64, and a Magnetar for PluginSdk.
+# Quasar installs its managed Magnetar into this run's fresh volume only when the server starts, after this build, so the
+# official Magnetar image's libraries stand in for it.
+magnetar_sdk = os.path.join(work, 'magnetar')
+if companions:
+    os.makedirs(magnetar_sdk, exist_ok=True)
+    holder = f'plugincheck-managed-sdk-{os.getpid()}'
+    docker('create', '--name', holder, 'ghcr.io/cometworks/magnetar:latest')
+    docker('cp', f'{holder}:/opt/magnetar/Libraries', magnetar_sdk)
+    docker('rm', '-v', holder)
 for c in companions:
     build.append(f'dotnet build "{c["projectPath"]}" -c Release -v:minimal -o ".quasar/companions/{c["id"]}" -p:Platform=x64 '
-                 f'-p:CopyLocalLockFileAssemblies=true -p:MagnetarProtocolAssembly=/opt/quasar/Agent/Magnetar.Protocol.dll -p:DS64={DS}/DedicatedServer64')
+                 f'-p:CopyLocalLockFileAssemblies=true -p:MagnetarProtocolAssembly=/opt/quasar/Agent/Magnetar.Protocol.dll -p:DS64={DS}/DedicatedServer64 -p:Magnetar=/magnetar')
 build += ['echo PLUGINCHECK_BUILD_OK', 'cd /opt/quasar', 'exec /opt/quasar/Quasar']
 # The UI is published to this machine only. A local request counts as trusted, so no Steam sign-in is needed.
 ui = ('-p', f'127.0.0.1:{UI_PORT}:8080', '-e', f'QUASAR_PUBLIC_BASE_URL=http://127.0.0.1:{UI_PORT}', '-e', 'QUASAR_UI_PLUGIN_DIRS=/plugins')
+if companions:
+    ui += ('-v', f'{magnetar_sdk}:/magnetar:ro')
 container = start('server', latest, '; '.join(build), ui)
 
 
