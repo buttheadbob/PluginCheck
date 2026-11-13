@@ -278,6 +278,20 @@ from has none.
 - Check for background threads touching game objects, unbounded queues, and blocking waits on the thread pool.
 - Exceptions thrown inside game callbacks can stop the server. Check for guards.
 
+### Clusters and network mounts
+
+A plugin can be fine on one server and still stop a node, because a cluster's shared folder is a network mount and a file error that never happens on a
+local disk happens there. Quasar clusters are Linux only, and on Linux only `ENOENT` and `ENOTDIR` make `File.GetLastWriteTimeUtc` return its empty time: any
+other error throws. Read every lead from the `storage` stage:
+
+- `UNGUARDED`: nothing catches a file error on the way up from `plugin.Update()`, so it leaves the plugin into the game. Say what stops.
+- `GAME-THREAD`: a hung hard mount stops the simulation until it answers. Ask how often it runs and whether the file can be on a shared folder.
+- `READ-DEFAULT`: a failed read goes on with defaults and the next write replaces the real file. A failed read must keep what it had, and must never be saved.
+- `NODE-FILE`: each process has its own user data folder, so a setting or a list made on one node is not on the next. `GetSharedDirectory` is the shared one.
+- `NODE-STATE`: anything in memory by player or grid stays behind in a handover. `GridHandover` carries state with a grid.
+
+A plugin may not support clusters at all, so `NODE-FILE` and `NODE-STATE` are for information unless its text says it works on one.
+
 ### Code quality
 
 The `lint` stage lists analyzer warnings by rule. Most are taste. Report those that can cause a wrong result, such as an
@@ -357,6 +371,8 @@ Found in real reviews. Check for these every time:
 | An interval of zero loops every tick | A bad or blank time becomes zero | Enter 00:00:00 and an unreadable value |
 | `24:00:00` means 24 days | `TimeSpan.Parse` reads it that way | Use one strict parser for every time field |
 | An entity lookup finds nothing off the game thread | `MyEntities.Load` can leave entities in the game thread's `[ThreadStatic]` list, so `MyEntities.GetEntityById` returns null elsewhere | `threads` lists these calls. Read every lookup by id in background code |
+| A file error stops a node | File calls in `plugin.Update()` with no catch on the way up, on a shared mount | `storage` lists them as `UNGUARDED`. Nothing above a plugin's Update catches it |
+| A failed read loses the real file | The catch goes on with defaults, and the next write saves them over the real data | `storage` lists them as `READ-DEFAULT`. Keep the cached value |
 | A value the game only sets within one call | A flag set and cleared inside one game thread call can never be seen from the same thread | Read the game code around it. `MySession.ServerSaving` is one |
 | A setting applies at once but the text says it waits for Save | The code changed and the text did not | Follow what happens on change, not on Save |
 

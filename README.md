@@ -105,6 +105,7 @@ plugin code. `PULSAR_GITHUB_TOKEN` works too.
 | `threads` | .NET SDK image | Lists game objects used off the game thread, following calls through the plugin, and every call to a game member that behaves differently by thread. Leads to read. Always `review`, because no leads proves nothing |
 | `commands` | .NET SDK image | Warns when player-level commands can show data about other players: game data, grids, or a plugin's own records. Some are intended, so it never fails |
 | `nulls` | .NET SDK image | Lists game values that can be null, used with no check first. Leads to read |
+| `storage` | .NET SDK image | Lists what fails on a cluster or a network mount: file calls on the game thread, with no catch on the way up as `UNGUARDED`, failed reads that carry on with defaults, per node files, and state kept by player or grid. Leads to read |
 | `hostpackages` | Host and images | The plugin ships nothing the game or its loader already provides |
 | `magnetar` | Official Magnetar image | The loader compiles the plugin from source and a world loads. If Magnetar itself cannot start, such as on GitHub's rate limit, it ends as `unable to verify` and says why |
 | `legacy` | Our Proton image | The same test on MagnetarLegacy and .NET Framework 4.8. Logs are copied after the server stops, and the game's own log lands in `legacy-game.log` |
