@@ -477,18 +477,26 @@ def start_torch(build, seed, folder, container, volume, cores):
 
 def run_server(build, batch, save, probe_zip, queued=None):
     queued = queued or time.time()
-    # An exclusive lease, for a measurement that needs the machine quiet, holds every new server back until it is released.
-    while not lending.may_start():
-        time.sleep(10)
-    cores = slots.get()
-    if ending.is_set():
-        # The slot goes back, so the next waiter wakes and returns the same way.
+    while True:
+        # An exclusive lease, for a measurement that needs the machine quiet, holds every new server back until it is released.
+        while not lending.may_start():
+            time.sleep(10)
+        cores = slots.get()
+        if ending.is_set():
+            # The slot goes back, so the next waiter wakes and returns the same way.
+            slots.put(cores)
+            return [{'build': build['name'], 'state': 'not run', 'seconds': 0, 'blocked': None, 'log': [], 'scenario': p.get('name', 'discover'),
+                     'failed': 'the run was ending, so this server was not started'} for p in batch]
+        # Counted as running before the second look, so the lending beat never grants an exclusive request beside a server about to start.
+        with running_lock:
+            running[0] += 1
+        # The wait for a slot can be long. A request made during it holds this server back too, and the slot goes back meanwhile.
+        if lending.may_start():
+            break
+        with running_lock:
+            running[0] -= 1
         slots.put(cores)
-        return [{'build': build['name'], 'state': 'not run', 'seconds': 0, 'blocked': None, 'log': [], 'scenario': p.get('name', 'discover'),
-                 'failed': 'the run was ending, so this server was not started'} for p in batch]
     timing = {'queued': queued, 'slot': time.time(), 'cores': cores}
-    with running_lock:
-        running[0] += 1
     status(kind='server', cores=cores, build=build['name'], scenario=' + '.join(p.get('name', 'discover') for p in batch))
     served = None
 
@@ -981,7 +989,7 @@ def keep_lending():
     # Lending.beat never raises, and this catch is a second guard: the thread must live, or lent slots never come back.
     while True:
         try:
-            for cores in lending.beat(running[0]):
+            for cores in lending.beat(lambda: running[0]):
                 print(f'  {cores} came back from a borrower', flush=True)
                 slots.put(cores)
         except Exception as error:
