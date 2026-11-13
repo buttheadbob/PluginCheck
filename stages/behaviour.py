@@ -905,6 +905,13 @@ for line in sorted(no_example):
 print(f"{len(plans)} scenarios from {sum(len(r.get('commands', [])) for r in discovered.values())} commands and "
       f"{sum(len(r.get('settings', [])) for r in discovered.values())} settings", flush=True)
 known = classification.load(target['name'], repo)
+if not plans:
+    # A run with nothing to start says nothing, and looks finished. Say why instead.
+    only = os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')
+    why = f"no scenario contains '{only}' (PLUGINCHECK_BEHAVIOUR_ONLY)" if only else 'no scenario was made'
+    if known is None:
+        why += '. There is no current reading of the commands, so scenarios come only from their bare names: the source changed since the reading, or the commands stage did not run'
+    finish('not run', reason=why, discovered=discovered, buildsLeftOut=broken)
 if known is None:
     print('No current AI reading of these commands, so each one gets its own server. See the CLASSIFY lines from the commands stage.')
 else:
