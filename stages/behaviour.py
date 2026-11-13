@@ -250,7 +250,13 @@ def torch_build(guid):
         print(f'downloading the published {plugin.get("name")} {version} from torchapi.com')
         os.makedirs(cache, exist_ok=True)
         open(path, 'wb').write(get(TORCH_DOWNLOAD + guid, 300))
-    return {'name': 'published-torch', 'host': 'torch', 'zip': path, 'id': guid, 'plugin': plugin.get('name'), 'published': True, 'version': version, 'from': 'torchapi.com'}
+    # The name Torch loads it under is in its own manifest. The listing's title can differ, such as "Ore Yeeter" for OreYeeter.
+    try:
+        with zipfile.ZipFile(path) as package:
+            name = ET.fromstring(package.read('manifest.xml')).findtext('Name').strip()
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, AttributeError):
+        name = plugin.get('name')
+    return {'name': 'published-torch', 'host': 'torch', 'zip': path, 'id': guid, 'plugin': name, 'published': True, 'version': version, 'from': 'torchapi.com'}
 
 
 def published_builds():
