@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import githubtoken, startlog
+import githubtoken, repocopy, startlog
 import pin
 
 IMAGE = os.environ.get('PLUGINCHECK_LEGACY_IMAGE', 'plugincheck-magnetar-legacy:latest')
@@ -71,7 +71,7 @@ shutil.copy(os.path.join(repo, manifest), source)
 root = ET.parse(os.path.join(repo, manifest)).getroot()
 # Pulsar replaces a dev folder's id with the manifest's <Id>, so the profile must name that, not the folder.
 plugin_id = root.findtext('Id').strip()
-skip = shutil.ignore_patterns('bin', 'obj')
+skip = repocopy.unlinked(shutil.ignore_patterns('bin', 'obj'))
 for d in root.findall('SourceDirectories/Directory'):
     rel = d.text.strip()
     shutil.copytree(os.path.join(repo, rel), os.path.join(source, rel), ignore=skip)

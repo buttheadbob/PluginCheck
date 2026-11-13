@@ -9,6 +9,9 @@ must read it: this stage finds the lines, and does not know which ones matter.
 """
 import collections, json, os, re, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
+
 SKIP_DIRS = {'source', 'quasar-source', 'plugins', 'upstream', 'lint', 'threads', 'commands', 'reflection', 'dependencies', 'regcheck', 'torch-plugins', 'Content', 'content', 'Mods', 'cache'}
 STAGE_LOGS = {'behaviour', 'legacy', 'manifest', 'scan', 'policy', 'dependencies', 'inherited', 'magnetar', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'reflection',
               'threads', 'commands', 'nulls', 'similar', 'copies', 'hostpackages', 'lint', 'logcheck'}
@@ -43,7 +46,7 @@ def normal(line):
 groups = collections.OrderedDict()
 traces = collections.Counter()
 files = 0
-for d, ds, fs in os.walk(run_dir):
+for d, ds, fs in repocopy.walk(run_dir):
     ds[:] = [x for x in ds if x not in SKIP_DIRS]
     for f in fs:
         if not f.endswith('.log') or os.path.splitext(f)[0] in STAGE_LOGS:

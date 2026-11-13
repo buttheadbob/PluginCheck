@@ -12,7 +12,7 @@ it, which is fine for IDE use, since hub loaders ignore project files.
 import json, os, re, subprocess, sys, zipfile
 import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
-import pin
+import pin, repocopy
 
 SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 # Packages whose DLL is not named after them.
@@ -92,7 +92,7 @@ if 'torch' in target and os.path.isfile(zip_path):
                    'Shipped in the zip, and the host already has it.' if by else 'Shipped in the zip. Check it is needed and its origin is known.')
 
 # 3. Project files: not shipped by hub builds, so these are notes.
-for d, ds, fs in os.walk(repo):
+for d, ds, fs in repocopy.walk(repo):
     ds[:] = [x for x in ds if x not in SKIP]
     for f in fs:
         if not f.endswith('.csproj'):

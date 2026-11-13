@@ -6,6 +6,8 @@ Each rule has an id, a severity and the reason behind it, so a report can cite i
 person to judge it. Rules are line based, so a hit is a lead to read in context.
 """
 import json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 
 SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 
@@ -60,7 +62,7 @@ def scopes(rel):
 
 
 found = []
-for d, ds, fs in os.walk(repo):
+for d, ds, fs in repocopy.walk(repo):
     ds[:] = [x for x in ds if x not in SKIP]
     for f in fs:
         if not f.endswith(('.cs', '.razor', '.cshtml')):

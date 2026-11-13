@@ -10,7 +10,7 @@ import json, os, re, subprocess, sys
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import quoteattr
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
-import pin
+import pin, repocopy
 
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
 SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
@@ -41,7 +41,7 @@ def add(name, version, source):
     packages.setdefault((name, version), []).append(source)
 
 
-for folder, dirs, files in os.walk(repo):
+for folder, dirs, files in repocopy.walk(repo):
     dirs[:] = [d for d in dirs if d not in SKIP]
     for f in files:
         path = os.path.join(folder, f)

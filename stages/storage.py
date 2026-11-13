@@ -65,7 +65,7 @@ if not folders:
     finish('not run', reason='needs a Magnetar manifest, a Torch project or a Quasar companion to know which source to read')
 
 source = os.path.join(work, 'source')
-skip = shutil.ignore_patterns('.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries')
+skip = repocopy.unlinked(shutil.ignore_patterns('.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries'))
 for folder in folders:
     shutil.copytree(os.path.join(repo, folder), os.path.join(source, folder), ignore=skip, dirs_exist_ok=True)
 repocopy.add_implicit_usings(repo, folders, source)

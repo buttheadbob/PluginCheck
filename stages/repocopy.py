@@ -1,7 +1,33 @@
 """What a stage leaves out when it copies a plugin's repository to build it."""
-import os, shutil
+import os, shutil, stat
 
 ALWAYS = ('.claude', 'bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', '*.user')
+
+
+def linked(path):
+    """A symlink, or on Windows a junction. Either points outside the repository, such as at a game or Torch install, and copying or
+    walking it would take in that install's files, logs included. os.walk and shutil.copytree both follow junctions. A junction is
+    told by its reparse tag, as os.path.isjunction does from Python 3.12."""
+    if os.path.islink(path):
+        return True
+    try:
+        return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except (OSError, AttributeError):
+        return False
+
+
+def unlinked(patterns):
+    """An ignore for shutil.copytree that also leaves out linked folders and files, whatever their name."""
+    def ignore(folder, names):
+        return set(patterns(folder, names)) | {n for n in names if linked(os.path.join(folder, n))}
+    return ignore
+
+
+def walk(top):
+    """os.walk that does not go into linked folders. A caller's own pruning of the folder list still works."""
+    for folder, subfolders, files in os.walk(top):
+        subfolders[:] = [s for s in subfolders if not linked(os.path.join(folder, s))]
+        yield folder, subfolders, files
 
 
 def ignore(repo):
@@ -12,7 +38,7 @@ def ignore(repo):
             ignored = {line.strip().lstrip('/') for line in listed}
     except OSError:
         ignored = set()
-    return shutil.ignore_patterns(*ALWAYS, *(['Directory.Build.props'] if 'Directory.Build.props' in ignored else []))
+    return unlinked(shutil.ignore_patterns(*ALWAYS, *(['Directory.Build.props'] if 'Directory.Build.props' in ignored else [])))
 
 
 def companion_folders(repo, target):

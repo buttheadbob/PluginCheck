@@ -3,6 +3,8 @@
 usage: scan.py <target.json> [results.json]
 """
 import collections, json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 repo = target['repo']
@@ -36,9 +38,9 @@ for d, ds, fs in os.walk(repo):
     if '.git' in ds and os.path.abspath(d) != os.path.abspath(repo):
         outside.append(f'nested repository: {os.path.relpath(d, repo)}')
     for x in ds:
-        if os.path.islink(os.path.join(d, x)) and x not in SKIP:
+        if repocopy.linked(os.path.join(d, x)) and x not in SKIP:
             outside.append(f'linked folder: {os.path.relpath(os.path.join(d, x), repo)}')
-    ds[:] = [x for x in ds if x not in SKIP]
+    ds[:] = [x for x in ds if x not in SKIP and not repocopy.linked(os.path.join(d, x))]
     for f in fs:
         path = os.path.join(d, f)
         if f == '.gitmodules':
