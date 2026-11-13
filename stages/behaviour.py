@@ -34,7 +34,7 @@ from xml.sax.saxutils import escape
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, extraplugins, fixture, githubtoken, leases, startlog, timing as server_timing
+import classification, extraplugins, fixture, githubtoken, leases, serverhash, startlog, timing as server_timing
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -594,18 +594,20 @@ def remember_magnetar_cache(folder):
 
 
 def tool_hash():
-    """Everything of ours that shapes a result."""
-    digest = hashlib.sha256()
-    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py'), os.path.join('behaviour', 'extraplugins.py')):
-        digest.update(open(os.path.join(here, path), 'rb').read())
-    for folder in ('probe', 'torchprobe'):
-        digest.update(classification.folder_hash(os.path.join(here, 'behaviour', folder)).encode())
-    return digest.hexdigest()[:16]
+    """Everything of ours that shapes a server, and nothing that only decides which servers run or how they are compared (behaviour/serverhash.py)."""
+    return serverhash.tool_hash(here)
 
 
 def game_hash(host):
     found = docker('run', '--rm', '-v', f'{VOLUMES[host]}:/ds:ro', '--entrypoint', 'sha256sum', SDK, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
     return found[0][:16] if found else 'unknown'
+
+
+def image_hash(host):
+    """The id of the image a host's servers run from, so a pulled Magnetar or a rebuilt Torch or Legacy image runs every server again."""
+    image = {'magnetar': MAGNETAR, 'legacy': LEGACY, 'torch': TORCH}[host]
+    found = docker('image', 'inspect', '-f', '{{.Id}}', image).stdout.strip()
+    return found or 'unknown'
 
 
 def build_hash(build):
@@ -628,8 +630,10 @@ REPEATS = max(2, int(os.environ.get('PLUGINCHECK_REPEATS', '2')))
 
 
 def job_key(build, batch, repeat):
-    """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
-    parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
+    """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario.
+    The scenario file is in it as the probe gets it, so what the reading of the commands sets there, such as a read-only command's shorter
+    wait, counts too."""
+    parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], images[build['host']], repeat, scenario_file(build, batch),
              [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle'), p.get('node')] for p in batch], options.get('settleSeconds'),
              bool(options.get('programmableBlocks')), bool(options.get('shipDrills'))]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
@@ -925,6 +929,7 @@ print('discovering each build', flush=True)
 fingerprints = {b['name']: build_hash(b) for b in builds}
 tools = tool_hash()
 games = {host: game_hash(host) for host in {b['host'] for b in builds}}
+images = {host: image_hash(host) for host in {b['host'] for b in builds}}
 discovered = {}
 
 

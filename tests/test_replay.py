@@ -120,17 +120,16 @@ class BeforeAndAfterTests(unittest.TestCase):
         self.assertTrue(found['fields']['differences'])
 
     def test_reused_results(self):
-        """A second run reusing the first one's results, old and new from the same cache."""
+        """A second run reusing the first one's results. Each version reuses its own first run's cache, since a kept result's key may
+        change between versions, and then the second runs must agree."""
         case = synthetic_case()
-        first = replay_of(BEFORE, case)
-        cache = os.path.join(first.folder, 'cache')
-        old_folder, new_folder = replay.folder(), replay.folder()
-        shutil.copytree(cache, os.path.join(old_folder, 'cache'))
-        shutil.copytree(cache, os.path.join(new_folder, 'cache'))
-        old = replay.Replay(BEFORE, dict(case), old_folder).run().result()
-        new = replay.Replay(SOURCE, dict(case, discover_delay={'published-torch': 0.5}), new_folder).run().result()
-        self.assertGreater(old['fields']['reused'], 0)
-        self.assertEqual(new, old)
+        second = {}
+        for name, source in (('old', BEFORE), ('new', SOURCE)):
+            first = replay_of(source, case)
+            again = replay.Replay(source, dict(case, discover_delay={'published-torch': 0.5}), first.folder)
+            second[name] = again.run().result()
+        self.assertGreater(second['old']['fields']['reused'], 0)
+        self.assertEqual(second['new'], second['old'])
 
     def real_case(self, target_name, stamp):
         folder = os.path.join(RUNS, target_name, stamp)
