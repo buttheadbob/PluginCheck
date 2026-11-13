@@ -357,6 +357,7 @@ Found in real reviews. Check for these every time:
 | An interval of zero loops every tick | A bad or blank time becomes zero | Enter 00:00:00 and an unreadable value |
 | `24:00:00` means 24 days | `TimeSpan.Parse` reads it that way | Use one strict parser for every time field |
 | An entity lookup finds nothing off the game thread | `MyEntities.Load` can leave entities in the game thread's `[ThreadStatic]` list, so `MyEntities.GetEntityById` returns null elsewhere | `threads` lists these calls. Read every lookup by id in background code |
+| A value the game only sets within one call | A flag set and cleared inside one game thread call can never be seen from the same thread | Read the game code around it. `MySession.ServerSaving` is one |
 | A setting applies at once but the text says it waits for Save | The code changed and the text did not | Follow what happens on change, not on Save |
 
 ## Step 4: Report

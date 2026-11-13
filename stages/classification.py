@@ -16,8 +16,10 @@ examples lists real ways to run a command, because a placeholder argument only r
 adds the online players without changing who runs it. The fixture's names are the only ones that exist: FixturePlayer, FixtureRecent, the grids
 in fixture.py, and, once a scenario has a caller or online, ProbeCaller and ProbeTarget, who are online with characters. With examples, only they run.
 
+A line can also say settle (seconds after the world is ready before it runs), min (seconds to keep watching afterwards), settings (values for this line
+only, of any type) and flip false (do not repeat this line with each on/off setting).
 Lines joined with " && " run one after the other on one server, so one command can set up the next. The probe has lines of its own for such a chain:
-probe:wait <seconds>.
+probe:wait <seconds>, probe:sit <cockpit name> (seats the caller), probe:off <block name>, probe:file <path under the user data folder> (its text) and probe:save.
 
   "!economy give": {"reads": ["economy"], "writes": ["economy"], "settings": [], "why": "...", "examples": ["!economy give FixturePlayer 100"]},
   "!economy top":  {"reads": ["economy"], "writes": [], "settings": ["PublicBalances"], "why": "...", "examples": [
@@ -132,7 +134,7 @@ def batches(plans, known):
     groups = {}
     for plan in plans:
         # Online players change what every command in a server sees, so scenarios with them do not share with those without.
-        groups.setdefault((tuple(sorted(plan.get('settings', {}).items())), bool(plan.get('players'))), []).append(plan)
+        groups.setdefault((tuple(sorted(plan.get('settings', {}).items())), bool(plan.get('players')), plan.get('settle')), []).append(plan)
     out = []
     for group in groups.values():
         # So does a scenario that removes things, because that would reach anything sharing its server.

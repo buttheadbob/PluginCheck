@@ -8,9 +8,11 @@ using System.Reflection;
 using System.Text;
 using Sandbox.Engine.Physics;
 using Sandbox.Game.Entities;
+using Sandbox.Game.Entities.Cube;
 using Sandbox.Game.GameSystems;
 using Sandbox.Game.GameSystems.BankingAndCurrency;
 using Sandbox.Game.Multiplayer;
+using Sandbox.Game.Screens.Helpers;
 using Sandbox.Game.World;
 using VRage;
 using VRage.FileSystem;
@@ -83,6 +85,8 @@ public sealed class ProbeCore
     private string _last = "";
     private readonly List<List<string>> _replies = new();
     private readonly Queue<string> _lines = new();
+    // The caller, for probe lines that act as them.
+    private static MyPlayer? _seated;
     private int _resumeAt;
     private readonly List<string> _settingsApplied = new();
     private int _ticks;
@@ -162,6 +166,7 @@ public sealed class ProbeCore
         if (_addPlayers)
         {
             _callerPlayer = OnlinePlayer(CallerSteamId, "ProbeCaller");
+            _seated = _callerPlayer;
             OnlinePlayer(TargetSteamId, "ProbeTarget");
         }
 
@@ -221,8 +226,49 @@ public sealed class ProbeCore
                 _resumeAt = _ticks + int.Parse(line.Substring("probe:wait ".Length), CultureInfo.InvariantCulture) * 60;
                 return;
             }
-            _replies.Add(_host.Run(line, CallerFor(_steps[_step].Caller)));
+            _replies.Add(line.StartsWith("probe:", StringComparison.Ordinal) ? new List<string> { TryProbeAction(line) } : _host.Run(line, CallerFor(_steps[_step].Caller)));
         }
+    }
+
+    // A probe line that fails, such as one naming a block the world does not have, says so in its replies, and the scenario carries on.
+    private static string TryProbeAction(string line)
+    {
+        try
+        {
+            return ProbeAction(line);
+        }
+        catch (Exception e)
+        {
+            return line + ": failed, " + e.GetType().Name + ": " + e.Message;
+        }
+    }
+
+    // What a client or an autosave does, which a scenario has no other way to cause.
+    private static string ProbeAction(string line)
+    {
+        string[] words = line.Split(new[] { ' ' }, 3);
+        switch (words[0])
+        {
+            case "probe:off":
+                MyFunctionalBlock off = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyFunctionalBlock>()).First(b => b.CustomName.ToString() == words[1]);
+                off.Enabled = false;
+                return line + ": " + (off.Enabled ? "still on" : "off");
+            case "probe:file":
+                // A file under the server's user data folder, such as a plugin's config, as it is now.
+                string read = Path.Combine(MyFileSystem.UserDataPath, string.Join(" ", words.Skip(1)));
+                return line + ": " + (File.Exists(read) ? File.ReadAllText(read).Replace("\r", "").Replace("\n", " ") : "(no file)");
+            case "probe:sit":
+                MyCockpit cockpit = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyCockpit>()).First(c => c.CustomName.ToString() == words[1]);
+                cockpit.AttachPilot(_seated?.Character ?? throw new InvalidOperationException("no caller to seat"), 0);
+                return line + ": " + (cockpit.Pilot != null ? "seated" : "not seated");
+        }
+
+        if (line == "probe:save")
+        {
+            MyAsyncSaving.Start();
+            return line + ": ServerSaving=" + Lower(MySession.Static.ServerSaving);
+        }
+        throw new InvalidOperationException("unknown probe line");
     }
 
     // Waits for the world to stop changing, since nothing says when a plugin has finished.
@@ -377,7 +423,7 @@ public sealed class ProbeCore
         {
             if (!_settings.TryGetValue(setting.Name, out string? text))
                 continue;
-            object value = Convert.ChangeType(text, setting.PropertyType, CultureInfo.InvariantCulture);
+            object value = setting.PropertyType.IsEnum ? Enum.Parse(setting.PropertyType, text) : Convert.ChangeType(text, setting.PropertyType, CultureInfo.InvariantCulture);
             setting.SetValue(owner, value);
             _settingsApplied.Add(setting.Name + "=" + text);
         }
