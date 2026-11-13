@@ -1,0 +1,17 @@
+{
+  "name": "OreYeeter",
+  "repo": "../OreYeeter",
+  "magnetar": {
+    "manifest": "OreYeeter.xml",
+    "project": "ServerPlugin/ServerPlugin.csproj"
+  },
+  "torch": {
+    "project": "TorchPlugin/OreYeeter.csproj",
+    "zip": "Build/OreYeeter.zip",
+    "guid": "7c1f5d2e-3b8a-4e6f-9a41-5d0c2b7e9f13"
+  },
+  "behaviour": {
+    "shipDrills": true,
+    "legacy": true
+  }
+}

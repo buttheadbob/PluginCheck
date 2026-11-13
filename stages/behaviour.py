@@ -54,7 +54,7 @@ IDLE_SECONDS = 120
 # All a plugin can tell about being on a cluster: PluginSdk's PluginCluster.IsClusterProcess reads the first, and PluginStorage the second. One process
 # with these is a cluster node to a plugin, with no gateway or other nodes, and a line that writes the shared folder stands in for another node.
 CLUSTER_NODE = ['-e', 'CLUSTER_NODE_ID=plugincheck', '-e', 'CLUSTER_SHARED_ROOT=/data/shared']
-COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection', 'enabled', 'functional', 'working', 'integrity', 'customData')
+COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection', 'enabled', 'functional', 'working', 'integrity', 'customData', 'holds')
 # Measured on AutoStation: 16 servers on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
 CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
 # A server settles near 1 GB and peaked at 0.95 GiB when measured. This leaves room for the compile and world load at the start of each one.
@@ -74,7 +74,7 @@ magnetar_cache = None
 
 # What a target asks of this stage, all of it optional: legacy (run on MagnetarLegacy too), settleSeconds (wait this long after the
 # world is ready, for a plugin with a warm-up), removeDuring (commands to run again with things taken out of the world part way through)
-# and programmableBlocks (add what behaviour/programmable.py builds to its world).
+# and programmableBlocks and shipDrills (add what behaviour/programmable.py and behaviour/drilling.py build to its world).
 options = target.get('behaviour', {})
 
 
@@ -131,11 +131,12 @@ def copy_world_files():
     done = docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '-v', f'{out}:/out', '--entrypoint', 'bash', SDK, '-c',
                   'cp "/ds/Content/CustomWorlds/Empty World/"SANDBOX_0_0_0_.sbs "/ds/Content/CustomWorlds/Empty World/"Sandbox*.sbc /out/ && '
                   'cp "/ds/Content/CustomWorlds/Moon Base/PC/SANDBOX_0_0_0_.sbs" /out/moon.sbs && '
-                  'cp "/ds/Content/CustomWorlds/Moon Base/PC/"*.vx2 /out/')
+                  'cp "/ds/Content/CustomWorlds/Moon Base/PC/"*.vx2 /out/' +
+                  (' && cp /ds/Content/VoxelMaps/Asteroid128-001.vx2 /out/' if options.get('shipDrills') else ''))
     if done.returncode:
         finish('not run', reason='could not copy the game saves the fixture needs: ' + done.stderr[-300:])
     save = os.path.join(work, 'fixture')
-    fixture.build(out, os.path.join(out, 'moon.sbs'), save, bool(options.get('programmableBlocks')))
+    fixture.build(out, os.path.join(out, 'moon.sbs'), save, bool(options.get('programmableBlocks')), bool(options.get('shipDrills')))
     return save
 
 
@@ -516,7 +517,7 @@ def remember_magnetar_cache(folder):
 def tool_hash():
     """Everything of ours that shapes a result."""
     digest = hashlib.sha256()
-    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py')):
+    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py')):
         digest.update(open(os.path.join(here, path), 'rb').read())
     for folder in ('probe', 'torchprobe'):
         digest.update(classification.folder_hash(os.path.join(here, 'behaviour', folder)).encode())
@@ -543,7 +544,7 @@ def job_key(build, batch, repeat):
     """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
     parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
              [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle'), p.get('node')] for p in batch], options.get('settleSeconds'),
-             bool(options.get('programmableBlocks'))]
+             bool(options.get('programmableBlocks')), bool(options.get('shipDrills'))]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
 
 

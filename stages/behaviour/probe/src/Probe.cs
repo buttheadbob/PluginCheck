@@ -17,6 +17,7 @@ using Sandbox.Game.Screens.Helpers;
 using Sandbox.Game.World;
 using VRage;
 using VRage.FileSystem;
+using VRage.Game;
 using VRage.Game.Entity;
 using VRage.Game.ModAPI;
 using VRage.Utils;
@@ -250,6 +251,14 @@ public sealed class ProbeCore
         string[] words = line.Split(new[] { ' ' }, 3);
         switch (words[0])
         {
+            case "probe:empty":
+                foreach (MyTerminalBlock watched in Watched())
+                    watched.GetInventory()?.Clear();
+                return line + ": done";
+            case "probe:fill":
+                var ore = new MyObjectBuilder_Ore { SubtypeName = words[2].Split(' ')[0] };
+                Watched().First(b => b.CustomName.ToString() == words[1]).GetInventory().AddItems(int.Parse(words[2].Split(' ')[1], CultureInfo.InvariantCulture), ore);
+                return line + ": done";
             case "probe:sharedwrite":
                 string path = Path.Combine(SharedFolder(), words[1]);
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -289,6 +298,9 @@ public sealed class ProbeCore
     }
 
     private static string SharedFolder() => Directory.GetDirectories(Path.Combine(Environment.GetEnvironmentVariable("CLUSTER_SHARED_ROOT")!, "plugins")).Single();
+
+    private static List<MyTerminalBlock> Watched() =>
+        MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyTerminalBlock>()).Where(b => b.CustomName.ToString().StartsWith("watch-", StringComparison.Ordinal)).ToList();
 
     private static List<MyProgrammableBlock> ProgrammableBlocks() =>
         MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyProgrammableBlock>()).ToList();
@@ -480,6 +492,8 @@ public sealed class ProbeCore
         }
         foreach (MyProgrammableBlock block in ProgrammableBlocks())
             grids["pb:" + block.CustomName] = DescribeBlock(block);
+        foreach (MyTerminalBlock block in Watched())
+            grids["pb:" + block.CustomName] = "{\"enabled\":" + Lower((block as MyFunctionalBlock)?.Enabled ?? true) + ",\"holds\":" + Quote(Holds(block)) + "}";
         int others = MyEntities.GetEntities().Count(e => e is not MyCubeGrid);
         return "{\"grids\":{" + string.Join(",", grids.Select(g => Quote(g.Key) + ":" + g.Value)) + "},\"otherEntities\":" + others
             + ",\"identities\":" + MySession.Static.Players.GetAllIdentities().Count + ",\"factions\":" + MySession.Static.Factions.Count() + "}";
@@ -494,6 +508,10 @@ public sealed class ProbeCore
             + ",\"connection\":" + Quote(connection?.GetType().Name ?? "")
             + ",\"inGravity\":" + Lower(!Vector3D.IsZero(MyGravityProviderSystem.CalculateNaturalGravityInPoint(grid.PositionComp.GetPosition()))) + "}";
     }
+
+    // Names only: an amount would change on every check, and the world would never count as settled.
+    private static string Holds(MyTerminalBlock block) =>
+        string.Join(",", (block.GetInventory()?.GetItems() ?? new List<MyPhysicalInventoryItem>()).Select(item => item.Content.SubtypeName).Distinct().OrderBy(name => name, StringComparer.Ordinal));
 
     private static string DescribeBlock(MyProgrammableBlock block)
     {

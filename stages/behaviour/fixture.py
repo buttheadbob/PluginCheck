@@ -176,14 +176,14 @@ def server_settings(text):
     return text.replace('<OnlineMode>OFFLINE</OnlineMode>', '<OnlineMode>PRIVATE</OnlineMode><TrashRemovalEnabled>false</TrashRemovalEnabled>')
 
 
-def build(empty_world, moon_sector, out, programmable_blocks=False):
+def build(empty_world, moon_sector, out, programmable_blocks=False, ship_drills=False):
     """Writes the fixture save to out, from copies of the game's Empty World and Moon Base saves."""
     os.makedirs(out, exist_ok=True)
     read = lambda name: open(os.path.join(empty_world, name), encoding='utf-8').read()
 
     planet, moon_position, moon_radius = moon(open(moon_sector, encoding='utf-8').read())
-    import programmable
-    grids = world(moon_position, moon_radius) + (programmable.objects() if programmable_blocks else [])
+    import drilling, programmable
+    grids = world(moon_position, moon_radius) + (programmable.objects() if programmable_blocks else []) + (drilling.objects() if ship_drills else [])
     objects = planet + ''.join(grids)
     sector = re.sub(r'<SectorObjects>.*</SectorObjects>', lambda _: f'<SectorObjects>{objects}</SectorObjects>', read('SANDBOX_0_0_0_.sbs'), flags=re.S)
 
@@ -194,7 +194,7 @@ def build(empty_world, moon_sector, out, programmable_blocks=False):
     checkpoint = re.sub(r'<CharacterEntityId>\d+</CharacterEntityId>', '<CharacterEntityId>0</CharacterEntityId>', checkpoint)
     checkpoint = re.sub(r'<ClientId>\d+</ClientId>', f'<ClientId>{OLD_PLAYER_STEAM}</ClientId>', checkpoint)
     checkpoint = checkpoint.replace('Skinface', 'FixturePlayer').replace('<Connected>true</Connected>', '<Connected>false</Connected>')
-    for identity, steam, name in [(RECENT_PLAYER, RECENT_PLAYER_STEAM, 'FixtureRecent')] + (list(programmable.PLAYERS) if programmable_blocks else []):
+    for identity, steam, name in [(RECENT_PLAYER, RECENT_PLAYER_STEAM, 'FixtureRecent')] + (list(programmable.PLAYERS) if programmable_blocks or ship_drills else []):
         checkpoint = add_player(checkpoint, now, identity, steam, name)
     checkpoint = checkpoint.replace('</LastLoginTime>\n    </MyObjectBuilder_Identity>', '</LastLoginTime>\n      <LastLogoutTime>2016-12-19T15:09:41</LastLogoutTime>\n    </MyObjectBuilder_Identity>')
     checkpoint = re.sub(r'<NonPlayerIdentities\s*/>|<NonPlayerIdentities>.*?</NonPlayerIdentities>', f'<NonPlayerIdentities><long>{NPC}</long></NonPlayerIdentities>', checkpoint, flags=re.S)
