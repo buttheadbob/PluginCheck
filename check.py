@@ -4,7 +4,7 @@ usage: python check.py <target> [--only manifest,scan,...] [--skip torch,...] [-
        python check.py <target> --pre                    the pre-container lane's half of a run (README, Pre-container lane)
        python check.py <target> --continue <run folder>  the rest of that run: behaviour and logcheck
 """
-import argparse, atexit, contextlib, datetime, glob, hashlib, json, os, shutil, subprocess, sys, threading, time
+import argparse, atexit, contextlib, datetime, glob, hashlib, json, os, shutil, signal, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'stages'))
@@ -65,6 +65,16 @@ LAST = 'logcheck'
 # The stages that never start a container. Every other stage waits at its start while an exclusive request waits or holds the machine
 # (leases.RunHold), and counts as running until it ends. tests/test_hold.py fails when a stage listed here mentions docker.
 NO_DOCKER = ('manifest', 'scan', 'policy', 'similar', 'copies', 'inherited', LAST)
+# Each stage runs in a process group of its own, so a Ctrl-C typed at the console reaches this script alone. It sends the stage INTERRUPT and
+# gives it STOP_SECONDS to clean up, such as behaviour removing its servers, before it ends it. A typed Ctrl-Break reaches every process on the
+# console whatever its group, so the stage gets that one at once too.
+GROUP = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
+INTERRUPT = signal.CTRL_BREAK_EVENT if os.name == 'nt' else signal.SIGINT
+STOP_SECONDS = 60
+INTERRUPTED = 'the run was interrupted while this stage ran'
+BEFORE_START = 'the run was interrupted before this stage started.'
+# A stage that ended with no result while the run was being interrupted waits this long for the main thread to set stopping (run_stage).
+NOTICE_SECONDS = 2
 NEEDS_DIR = {'similar', 'copies', 'magnetar', 'legacy', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'behaviour', 'inherited', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'storage', 'hostpackages', 'lint', 'logcheck'}
 
 parser = argparse.ArgumentParser()
@@ -170,6 +180,10 @@ results_path = os.path.join(run_dir, 'results.json')
 run_started = time.time()
 lock = threading.Lock()
 begun, finished_stages = {}, set(results['stages'])
+stopping, processes = threading.Event(), {}
+# Ctrl-Break, like Ctrl-C, ends the run through KeyboardInterrupt below.
+if hasattr(signal, 'SIGBREAK'):
+    signal.signal(signal.SIGBREAK, signal.default_int_handler)
 
 
 def game_build():
@@ -312,8 +326,21 @@ def run_stage(stage):
             env['PLUGINCHECK_CPUSET'] = cores
             if stage == ALONE:
                 env['PLUGINCHECK_BEHAVIOUR_DISCOVER_ONLY'] = '1'
-        # Unbuffered, so a stage's lines arrive as they happen and its log can be followed while it runs.
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', env=env)
+        # Started under the lock stop_stages sets stopping under, so a stage either starts before that and is interrupted with the others,
+        # or does not start at all, such as one let through the hold's gate by the run's end.
+        with lock:
+            late = stopping.is_set()
+            if not late:
+                # Unbuffered, so a stage's lines arrive as they happen and its log can be followed while it runs.
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', env=env,
+                                           **GROUP)
+                processes[stage] = process
+        if late:
+            with lock:
+                results['stages'][stage] = {'status': 'not run', 'reason': BEFORE_START}
+                finished_stages.add(stage)
+            display.stage_finished(stage, 'not run', f'{stage}: not run. {BEFORE_START}')
+            return
         last_line, finished = [time.time()], threading.Event()
         threading.Thread(target=heartbeat, args=(stage, start, last_line, finished), daemon=True).start()
         for line in process.stdout:
@@ -330,18 +357,63 @@ def run_stage(stage):
         process.wait()
         finished.set()
 
-    if os.path.exists(result_file):
+    seconds = int(time.time() - start)
+    if not stopping.is_set() and not os.path.exists(result_file):
+        # A typed Ctrl-Break reaches the stage as well as this script, and a stage can end on it before the main thread, which sees it
+        # within one 0.5 s join step (wait_for), has set stopping.
+        stopping.wait(NOTICE_SECONDS)
+    if stopping.is_set():
+        # No seconds: a stage cut short says nothing about how long it takes (past_seconds).
+        outcome = {'status': 'not run', 'reason': INTERRUPTED}
+    elif os.path.exists(result_file):
         outcome = json.load(open(result_file, encoding='utf-8'))
+        outcome['seconds'] = seconds
     else:
-        outcome = {'status': 'not run', 'reason': f'the stage stopped with exit code {process.returncode} and wrote no result'}
-    outcome['seconds'] = int(time.time() - start)
+        outcome = {'status': 'not run', 'reason': f'the stage stopped with exit code {process.returncode} and wrote no result', 'seconds': seconds}
     remember_stage(stage, key, outcome)
     with lock:
         results['stages'][stage] = outcome
         finished_stages.add(stage)
         # Written after every stage, so finished results can be read while the rest runs.
         json.dump(results, open(results_path, 'w', encoding='utf-8'), indent=1)
-    display.stage_finished(stage, outcome['status'], f"{stage}: {outcome['status']} in {clock(outcome['seconds'])}. About {left_text()}.")
+    display.stage_finished(stage, outcome['status'], f"{stage}: {outcome['status']} in {clock(seconds)}. About {left_text()}.")
+
+
+def interrupt(process):
+    try:
+        process.send_signal(INTERRUPT)
+    except OSError:
+        # No console to send it through.
+        process.kill()
+
+
+def stop_stages():
+    """Ctrl-C or Ctrl-Break: each running stage is interrupted and given STOP_SECONDS to clean up, then ended. No stage starts after this."""
+    # A further Ctrl-C or Ctrl-Break is ignored from here on: it would cut short the stages' clean-up, such as behaviour removing its servers,
+    # and the writing of the results.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if hasattr(signal, 'SIGBREAK'):
+        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+    with lock:
+        stopping.set()
+        running = [p for p in processes.values() if p.poll() is None]
+    display.line(f'interrupted: stopping {len(running)} running stages, giving them up to {STOP_SECONDS}s to clean up')
+    for process in running:
+        interrupt(process)
+    deadline = time.time() + STOP_SECONDS
+    while time.time() < deadline and any(p.poll() is None for p in running):
+        time.sleep(0.5)
+    for process in running:
+        if process.poll() is None:
+            process.kill()
+
+
+def wait_for(threads, seconds=None):
+    """Thread.join with no timeout cannot be interrupted on Windows: Ctrl-C and Ctrl-Break would wait for the whole run. So it joins in short steps."""
+    end = time.time() + seconds if seconds else None
+    for thread in threads:
+        while thread.is_alive() and (end is None or time.time() < end):
+            thread.join(0.5)
 
 
 gates = {s: threading.Event() for s in planned}
@@ -352,9 +424,13 @@ def when_ready(stage):
         gates[needed_first].wait()
     try:
         lint = results['stages'].get('lint', {})
-        if stage in STOPPED_BY_LINT and lint.get('status') == 'fail':
-            begun[stage] = time.time()
+        reason = None
+        if stopping.is_set():
+            reason = BEFORE_START
+        elif stage in STOPPED_BY_LINT and lint.get('status') == 'fail':
             reason = 'lint found compile errors, so no server was started. Fix those first.'
+        if reason:
+            begun[stage] = time.time()
             display.stage_started(stage, f'===== {stage} ===== skipped')
             with lock:
                 results['stages'][stage] = {'status': 'not run', 'reason': reason}
@@ -378,8 +454,16 @@ try:
     workers = [threading.Thread(target=when_ready, args=(s,), daemon=True) for s in planned]
     for worker in workers:
         worker.start()
-    for worker in workers:
-        worker.join()
+    try:
+        wait_for(workers)
+    except KeyboardInterrupt:
+        stop_stages()
+        # Each stopped stage records itself, and each one not started yet that it did not run. A stage whose output is still held open
+        # by something it started is recorded here.
+        wait_for(workers, STOP_SECONDS)
+        with lock:
+            for stage in planned:
+                results['stages'].setdefault(stage, {'status': 'not run', 'reason': INTERRUPTED})
 finally:
     # The lane's slot goes back to the run that lent it, or to the machine, as soon as its half is done. A waiting exclusive request is
     # granted as soon as the run's last stage is over, not after the clean-up.
@@ -407,4 +491,4 @@ display.close()
 print('\n===== summary =====')
 display.summary(results['stages'], path)
 print('AI operator: follow Agent.md. Read the code behind every lead and give each one a verdict. Never report a guess.')
-sys.exit(1 if any(o['status'] == 'fail' for o in results['stages'].values()) else 0)
+sys.exit(1 if stopping.is_set() or any(o['status'] == 'fail' for o in results['stages'].values()) else 0)

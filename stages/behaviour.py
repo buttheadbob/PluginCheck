@@ -31,7 +31,7 @@ In the pre-container lane (check.py --pre, README), PLUGINCHECK_BEHAVIOUR_DISCOV
 the scenarios are made, on the one slot PLUGINCHECK_CPUSET names, without acting as the owner of any slot. check.py --continue then runs it
 in full, and finds those discoveries in the results cache.
 """
-import atexit, concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
+import atexit, concurrent.futures, contextlib, glob, hashlib, io, itertools, json, os, queue, re, shutil, signal, subprocess, sys, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -67,6 +67,13 @@ CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
 # A server settles near 1 GB and peaked at 0.95 GiB when measured. This leaves room for the compile and world load at the start of each one.
 MEMORY_PER_SERVER_GIB = 1.8
 DISCOVER_ONLY = bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_DISCOVER_ONLY'))
+# Each server is the container plugincheck-behaviour-<the stage's process id>-<n>, with the volume of that name and -data (serve). Borrowed
+# slots' containers are named <session>-<n>, never this.
+SERVER_NAME = re.compile(r'plugincheck-behaviour-(\d+)-\d+(?:-data)?')
+# Set once the stage is ending (interrupted, or leaving): run_server starts no server after it.
+ending = threading.Event()
+# The clean-up repeats its removal for up to this long, until two listings in a row find none of this stage's servers (remove_own_servers).
+END_SECONDS = 10
 
 sys.stdout.reconfigure(line_buffering=True)
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -95,6 +102,38 @@ def finish(status, **fields):
     if result_path:
         json.dump({'status': status, **fields}, open(result_path, 'w', encoding='utf-8'), indent=1)
     sys.exit(1 if status == 'fail' else 0)
+
+
+def remove_servers(stage_ended):
+    """Removes the server containers, and their volumes, of the behaviour stages whose process id stage_ended(pid) says yes to. Returns the
+    containers removed, or None when Docker could not list them."""
+    def wanted(names):
+        return [n for n in names.split() if (m := SERVER_NAME.fullmatch(n)) and stage_ended(int(m.group(1)))]
+    listed = docker('ps', '-a', '--format', '{{.Names}}')
+    containers = wanted(listed.stdout)
+    if containers:
+        docker('rm', '-f', '-v', *containers)
+    volumes = wanted(docker('volume', 'ls', '--format', '{{.Name}}').stdout)
+    if volumes:
+        docker('volume', 'rm', *volumes)
+    return containers if listed.returncode == 0 else None
+
+
+def remove_own_servers():
+    """Stops new servers (ending), then removes this stage's servers. One whose docker run was already under way can appear after a listing,
+    so the removal repeats until two listings in a row find none, for up to END_SECONDS. A listing Docker refused counts as not empty."""
+    ending.set()
+    deadline, empty = time.time() + END_SECONDS, 0
+    while empty < 2 and time.time() < deadline:
+        empty = empty + 1 if remove_servers(lambda pid: pid == os.getpid()) == [] else 0
+        if empty < 2:
+            time.sleep(0.5)
+
+
+def remove_abandoned_servers():
+    """A stage that ended with no clean-up, such as one whose console window was closed, leaves its servers running with nothing to stop
+    them. Only those of a process that is gone are removed: a live one's, another run's included, are left alone."""
+    return remove_servers(lambda pid: pid != os.getpid() and not leases.process_alive(pid)) or []
 
 
 def write(path, text):
@@ -442,6 +481,11 @@ def run_server(build, batch, save, probe_zip, queued=None):
     while not lending.may_start():
         time.sleep(10)
     cores = slots.get()
+    if ending.is_set():
+        # The slot goes back, so the next waiter wakes and returns the same way.
+        slots.put(cores)
+        return [{'build': build['name'], 'state': 'not run', 'seconds': 0, 'blocked': None, 'log': [], 'scenario': p.get('name', 'discover'),
+                 'failed': 'the run was ending, so this server was not started'} for p in batch]
     timing = {'queued': queued, 'slot': time.time(), 'cores': cores}
     with running_lock:
         running[0] += 1
@@ -872,15 +916,57 @@ if 'magnetar' not in target and 'torch' not in target:
 if docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
     finish('not run', reason='no dedicated server yet. Run the magnetar stage first.')
 
+swept = remove_abandoned_servers()
+if swept:
+    print(f'removed {len(swept)} server containers left by a behaviour stage that ended without cleaning up', flush=True)
 shutil.rmtree(work, ignore_errors=True)
 os.makedirs(work)
 workers, slots = capacity()
 # Slots other sessions borrowed before this run started stay theirs until they come back.
 all_slots = list(slots.queue)
 # The lane's slot is lent to it by a run that owns the rest, so the lane never acts as an owner.
-lending = leases.Lending(None if DISCOVER_ONLY else lambda: leases.Owner(all_slots), say=lambda text: print(text, flush=True))
-# On every way out, finish() and a crash too, so other sessions do not wait on a run that has ended.
+
+
+def say_safely(text):
+    """print that never raises. When the console closes, check.py, which reads this output, may have ended already, and a write fails."""
+    with contextlib.suppress(OSError, ValueError):
+        print(text, flush=True)
+
+
+lending = leases.Lending(None if DISCOVER_ONLY else lambda: leases.Owner(all_slots), say=say_safely)
+# On every way out, finish() and a crash too, so other sessions do not wait on a run that has ended. The servers go first (atexit runs the
+# last registered first).
 atexit.register(lending.stop)
+atexit.register(remove_own_servers)
+interrupt_lock = threading.Lock()
+
+
+def interrupted():
+    """Ctrl-C, Ctrl-Break (typed, or sent by check.py when it is interrupted) or the console closing. The main thread waits on a server
+    pool, where no signal handler runs on Windows, and leaving normally would wait for every server to finish. So the servers are removed
+    here and the process ends at once. No server starts once ending is set. The clean-up comes before any output, and no step stops the
+    next: on a console close check.py may have ended already, and Windows ends this process a few seconds after the event."""
+    ending.set()
+    with interrupt_lock:
+        with contextlib.suppress(Exception):
+            remove_own_servers()
+        with contextlib.suppress(Exception):
+            lending.stop()
+        say_safely("interrupted: removed this run's servers")
+        os._exit(1)
+
+
+# Not when a test replays this stage inside its own process.
+if __name__ == '__main__':
+    if os.name == 'nt':
+        import ctypes
+        # Windows calls it on a thread of its own, whatever the main thread waits on. Kept referenced for the life of the process.
+        on_console = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda event: interrupted() if event in (0, 1, 2) else 0)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(on_console, True)
+    else:
+        for number in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(number, lambda *_: interrupted())
+
 already_lent = lending.lent_at_start
 if already_lent:
     kept = [c for c in list(slots.queue) if c not in already_lent]
