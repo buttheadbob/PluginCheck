@@ -57,6 +57,7 @@ A target can give the `behaviour` stage a `behaviour` section, all of it optiona
 | `removeDuring` | `commands` to run again while things leave the world, each alone on its server. `minSeconds` is the least each runs for. `remove` lists `after`, `kind` and `name`, where `kind` is `grid`, `block`, `identity`, `faction` or `player`. The player is a `MyPlayer` the probe adds under the server's own client, so this is a player leaving the session, not a real client disconnecting |
 | `plugins` | Other plugins a variant can load beside this one, each built from source at a pinned commit or tag. `stages/behaviour/extraplugins.py` has the format |
 | `variants` | More builds made from each working build: with `plugins` loaded and their `config`, with `files` written before start, or with an `overlay` folder laid over the source, each limited to its `scenarios` |
+| `leaveOut` | Builds to leave out of the run by name, such as a published build known to hang at start |
 
 Add `--hold` to leave the Quasar-managed server running at http://127.0.0.1:18080 with no time limit, to look around its
 UI. A local request counts as trusted, so no Steam sign-in is needed. The port is only open to this machine. The run

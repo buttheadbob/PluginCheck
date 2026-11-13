@@ -808,6 +808,10 @@ for source in (already, kept):
         shutil.copytree(source, os.path.join(magnetar_cache, 'GitHub'))
         break
 builds = working_builds() + published_builds()
+# A target can leave builds out by name, such as a published build known to hang at start.
+if options.get('leaveOut'):
+    print('left out by the target: ' + ', '.join(b['name'] for b in builds if b['name'] in options['leaveOut']))
+    builds = [b for b in builds if b['name'] not in options['leaveOut']]
 
 
 def overlay_copy(base, overlay, name):
