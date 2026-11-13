@@ -91,10 +91,19 @@ foreach (var tree in trees)
     }
 }
 
+// The classes of XAML pages, whose generated half this analysis does not compile.
+static HashSet<string> XamlClasses(Compilation compilation) => compilation.SyntaxTrees
+    .Where(t => t.FilePath.EndsWith(".xaml.cs", StringComparison.OrdinalIgnoreCase))
+    .SelectMany(t => t.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>()).Select(c => c.Identifier.Text).ToHashSet();
+
 var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error
     && d.Id != "CS1705" && d.Id != "CS1509" && !d.GetMessage().Contains("InitializeComponent")
     // A control named in a XAML page, which this analysis does not compile. The lint stage does cover these.
-    && !(d.Id == "CS0103" && (d.Location.SourceTree?.FilePath.EndsWith(".xaml.cs", StringComparison.OrdinalIgnoreCase) ?? false))).ToList();
+    && !(d.Id == "CS0103" && (d.Location.SourceTree?.FilePath.EndsWith(".xaml.cs", StringComparison.OrdinalIgnoreCase) ?? false))
+    // A XAML page's class takes its base type from the page, so code using it as a control does not convert here.
+    && !(d.Id is "CS0029" or "CS0266" or "CS1503" && XamlClasses(compilation).Any(name => d.GetMessage().Contains("." + name + "'") || d.GetMessage().Contains("'" + name + "'")))
+    // A plugin's projects, such as its Magnetar and Torch builds, each declare the assembly's version, and are compiled together here.
+    && d.Id != "CS0579").ToList();
 var errorSample = errors.GroupBy(d => d.Id).OrderByDescending(g => g.Count()).Take(5).Select(g => $"{g.Count()} {g.Key}: {g.First().GetMessage()}").ToArray();
 Console.WriteLine(JsonSerializer.Serialize(new { files = sources.Length, uses = seenRoots, compileErrors = errors.Count, errorSample, findings = findings.Values }));
 
