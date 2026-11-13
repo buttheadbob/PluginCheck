@@ -8,7 +8,7 @@ is listed as unchecked, so a reader knows to trace it by hand.
 """
 import json, os, re, shutil, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
-import pin
+import pin, repocopy
 
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
 SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
@@ -36,7 +36,7 @@ def finish(status, **fields):
 
 
 lookups, unchecked, own_types = [], [], set()
-for folder, dirs, files in os.walk(target['repo']):
+for folder, dirs, files in repocopy.walk(target['repo']):
     dirs[:] = [d for d in dirs if d not in SKIP]
     for f in files:
         if not f.endswith('.cs'):

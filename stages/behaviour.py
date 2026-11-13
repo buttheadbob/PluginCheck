@@ -38,7 +38,7 @@ from xml.sax.saxutils import escape
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, extraplugins, fixture, githubtoken, leases, serverhash, startlog, timing as server_timing
+import classification, extraplugins, fixture, githubtoken, leases, repocopy, serverhash, startlog, timing as server_timing
 import pin
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
@@ -193,7 +193,7 @@ def working_builds():
         source = os.path.join(work, 'working-magnetar-source')
         os.makedirs(source, exist_ok=True)
         shutil.copy(os.path.join(repo, manifest), source)
-        skip = shutil.ignore_patterns('bin', 'obj')
+        skip = repocopy.unlinked(shutil.ignore_patterns('bin', 'obj'))
         for d in root.findall('SourceDirectories/Directory'):
             shutil.copytree(os.path.join(repo, d.text.strip()), os.path.join(source, d.text.strip()), ignore=skip, dirs_exist_ok=True)
         builds.append({'name': 'working-magnetar', 'host': 'magnetar', 'source': source, 'manifest': os.path.basename(manifest),
@@ -970,7 +970,7 @@ for build in builds:
 for build in builds:
     if build['host'] == 'torch' and build.get('overlay'):
         build['overlay_source'] = os.path.join(work, f"{build['name']}-source")
-        shutil.copytree(repo, build['overlay_source'], ignore=shutil.ignore_patterns('.git', '.vs', '.idea', '.claude', 'bin', 'obj', 'Build'))
+        shutil.copytree(repo, build['overlay_source'], ignore=repocopy.unlinked(shutil.ignore_patterns('.git', '.vs', '.idea', '.claude', 'bin', 'obj', 'Build')))
         shutil.copytree(build['overlay'], build['overlay_source'], dirs_exist_ok=True)
         try:
             build['zip'] = extraplugins.torch_zip(build['overlay_source'], os.path.dirname(target['torch']['project']), os.path.join(work, f"{build['name']}-zip"),

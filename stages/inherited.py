@@ -13,6 +13,8 @@ subtracted to give the adjusted figure. Report the range. Code rewritten from th
 without any line matching, so even the raw figure is not a ceiling.
 """
 import collections, io, json, os, re, sys, urllib.request, zipfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 from difflib import SequenceMatcher
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -54,7 +56,7 @@ def code_lines(path):
     return out
 
 def walk(root):
-    for d, ds, fs in os.walk(root):
+    for d, ds, fs in repocopy.walk(root):
         ds[:] = [x for x in ds if x not in SKIP]
         for f in fs:
             if f.endswith(EXT) and f != 'AssemblyVersion.cs':

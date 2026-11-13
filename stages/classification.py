@@ -32,6 +32,7 @@ plugin-config, plugin-files. The names only have to match between commands, so u
 reach anything, such as a command that restarts the server, so it always gets its own.
 """
 import hashlib, json, os
+import repocopy
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKIP = {'.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries', 'Build', 'node_modules'}
@@ -45,7 +46,7 @@ def path_for(name):
 def source_hash(repo):
     """Of every C# file, so any change to the code asks for a fresh reading."""
     digest = hashlib.sha256()
-    for folder, subfolders, files in os.walk(repo):
+    for folder, subfolders, files in repocopy.walk(repo):
         # Pruned here, as the walk goes. Sorting the walk would read every folder first, game binaries included.
         subfolders[:] = sorted(s for s in subfolders if s not in SKIP)
         for name in sorted(files):
@@ -103,7 +104,7 @@ def best_match(command, known):
 def folder_hash(folder):
     """Of every file in a folder, for anything that decides a result: a plugin's project files as well as its code."""
     digest = hashlib.sha256()
-    for root, subfolders, files in os.walk(folder):
+    for root, subfolders, files in repocopy.walk(folder):
         subfolders[:] = sorted(s for s in subfolders if s not in SKIP)
         for name in sorted(files):
             digest.update(os.path.relpath(os.path.join(root, name), folder).replace(os.sep, '/').encode())
