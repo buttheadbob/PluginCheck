@@ -157,6 +157,19 @@ for name, same in sorted(named_only.items()):
         text = f"{typed(x)} ({name}#L{x['line']}-L{x['endLine']}) takes a player, but no data was traced from it. Read what it shows them."
         warnings.append(text)
         print('CHECK ' + text)
+# Torch finds a command's arguments with IndexOf over the whole line, so a value that is also in the command's own words starts too early.
+for x in report.get('torchArguments', []):
+    x['file'] = x['file'].replace('/work/source/', '')
+    line = f"{x['command'][1:]} {x['value']}"
+    text = (f"{x['command']} {x['value']} ({os.path.basename(x['file'])}#L{x['line']}): Torch finds arguments by searching the whole line, so '{x['value']}' is found in the "
+            f"command's own words and the handler gets '{line[line.lower().find(x['value'].lower()):]}'. A handler that reads its first word never sees '{x['value']}'.")
+    warnings.append(text)
+    print('WARN  ' + text)
+if report.get('torchFreeText'):
+    text = (f"These Torch commands take free text, and any value that also appears in their own words reaches them with those words in front of it. Check what each does "
+            f"with that: {', '.join(sorted(report['torchFreeText']))}")
+    warnings.append(text)
+    print('CHECK ' + text)
 report['warnings'] = warnings
 for x in report['everyCommand']:
     x['file'] = x['file'].replace('/work/source/', '')

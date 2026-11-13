@@ -802,12 +802,28 @@ by_name = {p['name']: p for p in plans}
 after_stage = int(os.environ.get('PLUGINCHECK_SECONDS_AFTER', '0'))
 started = time.time()
 wrongly_classified = {}
+WRONG_ARGUMENTS = 'PluginCheck: Torch passed '
+wrong_arguments = {}
+
+
+def note_arguments(record):
+    """Moves what the Torch probe said about a command's arguments out of its replies, so only the plugin's words are compared."""
+    replies = record.get('replies') or []
+    said = [r for r in replies if r.startswith(WRONG_ARGUMENTS)]
+    if not said:
+        return
+    record['replies'] = [r for r in replies if not r.startswith(WRONG_ARGUMENTS)]
+    record['wrongArguments'] = said[0]
+    if record['scenario'] not in wrong_arguments:
+        wrong_arguments[record['scenario']] = said[0]
+        print(f"LEAD  TORCH-ARGS  {record['scenario']}: {said[0]}. Read this reply: the handler did not get what was typed.", flush=True)
 
 
 def take(build, repeat, results):
     """Stores what one server recorded, and posts whatever that finishes."""
     for record in results:
         name = record['scenario']
+        note_arguments(record)
         records[build['name'], name, repeat] = record
         if record.get('failed') or record.get('state') != 'recorded':
             failure = {'build': build['name'], 'scenario': name, 'reason': str(record.get('failed') or record.get('blocked') or record.get('state'))[:400]}
@@ -848,6 +864,7 @@ if suspect:
         for future in concurrent.futures.as_completed(futures):
             build, repeat = futures[future]
             for record in future.result():
+                note_arguments(record)
                 records[build['name'], record['scenario'], repeat] = record
     real[:] = [d for d in real if d['scenario'] not in suspect]
     unstable_kept = {k: v for k, v in unstable.items() if k[0] not in suspect}
@@ -864,5 +881,5 @@ print('Each difference is a lead: it says two builds disagree, not which is righ
 crashed = any('stack' in f['reason'].lower() for f in failures)
 finish('fail' if crashed else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
        servers=len(jobs), reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
-       noChange=quiet, skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
+       noChange=quiet, wrongArguments=wrong_arguments, skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
        note='A difference is a lead. No differences proves nothing beyond these scenarios.')

@@ -81,6 +81,8 @@ foreach (var tree in trees)
 
 var commands = new List<object>();
 var everyCommand = new List<object>();
+var torchArguments = new List<object>();
+var torchFreeText = new List<string>();
 var playerCommands = 0;
 var allCommands = 0;
 foreach (var tree in trees)
@@ -102,6 +104,20 @@ foreach (var tree in trees)
             file = place.Path,
             line = place.StartLinePosition.Line + 1,
         });
+        // By the file, because a plugin with both hosts compiled together makes the attribute itself ambiguous.
+        if (tree.GetRoot() is CompilationUnitSyntax unit && unit.Usings.Any(u => u.Name?.ToString() == "Torch.Commands"))
+        {
+            var text = string.Join(" ", Root(method.ContainingType).Append(WrittenName(declaration) ?? method.Name)).Trim();
+            var reached = Reached(declaration, 2);
+            var takesWords = method.Parameters.Length > 0 || reached.Any(n => n is IdentifierNameSyntax { Identifier.ValueText: "Args" or "RawArgs" });
+            if (takesWords)
+            {
+                foreach (var (value, spot) in ComparedValues(reached, method).Where(v => text.Contains(v.Value, StringComparison.OrdinalIgnoreCase)).DistinctBy(v => v.Value))
+                    torchArguments.Add(new { command = "!" + text, value, file = spot.GetLineSpan().Path, line = spot.GetLineSpan().StartLinePosition.Line + 1 });
+                if (reached.Any(n => n is IdentifierNameSyntax { Identifier.ValueText: "Args" or "RawArgs" }) || method.Parameters.Any(p => p.Type.SpecialType == SpecialType.System_String))
+                    torchFreeText.Add("!" + text);
+            }
+        }
         if (!IsPlayerLevel(method))
             continue;
         playerCommands++;
@@ -156,7 +172,7 @@ var diagnostics = compilation.GetDiagnostics().Where(d => d.Severity == Diagnost
     // A plugin's projects, such as its Magnetar and Torch builds, each declare the assembly's version, and are compiled together here.
     && d.Id != "CS0579").ToList();
 var errorSample = diagnostics.GroupBy(d => d.Id).OrderByDescending(g => g.Count()).Take(6).Select(g => $"{g.Count()} {g.Key}: {g.First().GetMessage()}").ToArray();
-Console.WriteLine(JsonSerializer.Serialize(new { files = sources.Length, allCommands, playerCommands, compileErrors = diagnostics.Count, errorSample, commands, everyCommand }));
+Console.WriteLine(JsonSerializer.Serialize(new { files = sources.Length, allCommands, playerCommands, compileErrors = diagnostics.Count, errorSample, commands, everyCommand, torchArguments, torchFreeText }));
 
 void Walk(SyntaxNode start, SemanticModel model, string[] path, CommandWalk walk)
 {
@@ -392,11 +408,59 @@ static bool IsPlayerLevel(IMethodSymbol method)
     return permission != null && permission.ConstructorArguments.FirstOrDefault().Value is int and 0;
 }
 
+// A handler and what it calls in the plugin. Torch can hand any of them the wrong words, so the values they look for are what matter.
+List<SyntaxNode> Reached(SyntaxNode declaration, int depth)
+{
+    var found = new List<SyntaxNode>();
+    var visited = new HashSet<SyntaxNode>();
+    var waiting = new Queue<(SyntaxNode Node, int Depth)>();
+    waiting.Enqueue((declaration, 0));
+    while (waiting.Count > 0)
+    {
+        var (node, at) = waiting.Dequeue();
+        if (!visited.Add(node))
+            continue;
+        var model = compilation.GetSemanticModel(node.SyntaxTree);
+        foreach (var part in node.DescendantNodes())
+        {
+            found.Add(part);
+            if (at == depth || part is not InvocationExpressionSyntax)
+                continue;
+            var info = model.GetSymbolInfo(part);
+            if ((info.Symbol ?? info.CandidateSymbols.FirstOrDefault()) is { } called && methods.TryGetValue(called.OriginalDefinition, out var body))
+                waiting.Enqueue((body, at + 1));
+        }
+    }
+    return found;
+}
+
 // The name as written in [Command("...")], for when the attribute is ambiguous because both hosts are compiled together, so the
 // symbol has no constructor arguments. Without it the method's own name is used, which is not what Torch or Magnetar matches.
 static string? WrittenName(MethodDeclarationSyntax declaration) =>
     declaration.AttributeLists.SelectMany(l => l.Attributes).FirstOrDefault(a => a.Name.ToString() is "Command" or "CommandAttribute")
         ?.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax literal ? literal.Token.ValueText : null;
+
+// The fixed words a handler compares an argument with, and the names of an enum it takes.
+static IEnumerable<(string Value, Location Spot)> ComparedValues(List<SyntaxNode> reached, IMethodSymbol method)
+{
+    foreach (var type in method.Parameters.Select(p => p.Type).Where(t => t.TypeKind == TypeKind.Enum))
+        foreach (var member in type.GetMembers().OfType<IFieldSymbol>())
+            yield return (member.Name, method.Locations[0]);
+    foreach (var node in reached)
+    {
+        List<ExpressionSyntax> literals = node switch
+        {
+            ConstantPatternSyntax pattern => [pattern.Expression],
+            CaseSwitchLabelSyntax label => [label.Value],
+            BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.EqualsExpression) || binary.IsKind(SyntaxKind.NotEqualsExpression) => [binary.Left, binary.Right],
+            InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.ValueText: "Equals" } } call => call.ArgumentList.Arguments.Select(a => a.Expression).ToList(),
+            _ => [],
+        };
+        foreach (var literal in literals.OfType<LiteralExpressionSyntax>().Where(l => l.IsKind(SyntaxKind.StringLiteralExpression)))
+            if (literal.Token.ValueText.Length > 0 && !literal.Token.ValueText.Contains(' '))
+                yield return (literal.Token.ValueText, literal.GetLocation());
+    }
+}
 
 static IEnumerable<string> Root(INamedTypeSymbol type)
 {

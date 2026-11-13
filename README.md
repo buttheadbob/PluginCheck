@@ -267,6 +267,10 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
 - **Quasar 1.4.1.1 image:** `release.json` says `1.4.1-1` while the program reports `1.4.1.1`, so it cannot write the
   migration receipt that Quasar 1.5 requires, and a fresh 1.5 container cannot start. The `quasar` stage corrects that
   one field for the 1.4.1.1 step, so Quasar's own code writes the real receipt. Results record `releaseJsonWorkaround`.
+- **Torch passes the wrong arguments for some values.** `CommandTree.GetCommand` finds a command's arguments by searching the whole line for
+  the first one, so `on` in `!monitor everything on` is found in "monitor" and the handler gets `onitor everything on`. The `commands` stage warns
+  about values a Torch handler compares that also appear in its own words, and lists the ones taking free text. The Torch probe compares what
+  Torch would pass with what was typed on every line it runs, and `behaviour` prints a `TORCH-ARGS` lead when they differ.
 - **GitHub's limit stops Magnetar.** Magnetar fetches its core plugins from GitHub, 60 requests an hour without a token. When it runs out,
   `magnetar` and `legacy` end as `unable to verify` with the time it resets, and `regcheck` as `not run`. Run them again after that.
   `behaviour` waits for the reset by itself. A token avoids this, and `cache/magnetar-github` keeps each game build's downloads, so later
