@@ -303,7 +303,7 @@ def seed_magnetar(build, seed, folder):
     probe_folder = os.path.join(folder, 'source', PROBE)
     shutil.copytree(os.path.join(here, 'behaviour', 'probe'), probe_folder)
     name = build['plugin']
-    shutil.copytree(build['source'], os.path.join(folder, 'source', name), ignore=shutil.ignore_patterns('.git', 'bin', 'obj'))
+    shutil.copytree(build['source'], os.path.join(folder, 'source', name), ignore=shutil.ignore_patterns('.claude', '.git', 'bin', 'obj'))
     if magnetar_cache and not legacy:
         shutil.copytree(magnetar_cache, os.path.join(seed, 'Magnetar'), dirs_exist_ok=True)
     plugins = [(build['id'], name, build['manifest']), (PROBE_ID, PROBE, PROBE + '.xml')]

@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from xml.sax.saxutils import quoteattr
 
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])

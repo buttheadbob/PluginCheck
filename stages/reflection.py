@@ -9,7 +9,7 @@ is listed as unchecked, so a reader knows to trace it by hand.
 import json, os, re, shutil, subprocess, sys
 
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 LOOKUP = re.compile(r'typeof\(\s*([\w.]+(?:<[^>]*>)?)\s*\)\s*\.\s*Get(Method|Field|Property|NestedType)\(\s*(?:"(\w+)"|nameof\(\s*([\w.]+)\s*\))\s*(?:,\s*([^;]*?))?\)', re.S)
 HARMONY = re.compile(r'\[HarmonyPatch\(\s*typeof\(\s*([\w.]+)\s*\)\s*,\s*"(\w+)"')
 ANY = re.compile(r'\.Get(Method|Field|Property|NestedType)\(')

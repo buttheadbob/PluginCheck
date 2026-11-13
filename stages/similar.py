@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 SOURCES = {'MagnetarHub': 'https://codeload.github.com/CometWorks/magnetar-hub/zip/refs/heads/main',
            'QuasarHub': 'https://codeload.github.com/CometWorks/quasar-hub/zip/refs/heads/main'}
 TORCH = 'https://torchapi.com/api/plugins'
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs'}
 LENGTH = 320
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))

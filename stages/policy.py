@@ -7,7 +7,7 @@ person to judge it. Rules are line based, so a hit is a lead to read in context.
 """
 import json, os, re, sys
 
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 
 # id, severity, applies to (all, magnetar, shared, torch, quasar), pattern, why
 RULES = [

@@ -12,7 +12,7 @@ it, which is fine for IDE use, since hub loaders ignore project files.
 import json, os, re, subprocess, sys, zipfile
 import xml.etree.ElementTree as ET
 
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 # Packages whose DLL is not named after them.
 DLL_NAMES = {'lib.harmony': '0harmony', 'harmony': '0harmony', 'protobuf-net': 'protobuf.net', 'protobuf-net.core': 'protobuf.net.core'}
 

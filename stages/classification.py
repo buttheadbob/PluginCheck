@@ -19,7 +19,7 @@ reach anything, such as a command that restarts the server, so it always gets it
 import hashlib, json, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SKIP = {'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries', 'Build', 'node_modules'}
+SKIP = {'.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries', 'Build', 'node_modules'}
 EVERYTHING = {'*'}
 
 
