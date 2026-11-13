@@ -48,7 +48,8 @@ namespace PluginCheckProbe
                     var command = method.GetCustomAttribute<CommandAttribute>();
                     if (command == null)
                         continue;
-                    var path = (category?.Path ?? new List<string>()).Concat(new[] { command.Name });
+                    // Name is only the last word of [Command("rep wipe")]. Path has all of them.
+                    var path = (category?.Path ?? new List<string>()).Concat(command.Path);
                     yield return new CommandInfo
                     {
                         Line = "!" + string.Join(" ", path),

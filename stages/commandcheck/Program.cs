@@ -98,7 +98,7 @@ foreach (var tree in trees)
         var place = declaration.GetLocation().GetLineSpan();
         everyCommand.Add(new
         {
-            command = "!" + string.Join(" ", Root(method.ContainingType).Append(command.ConstructorArguments.FirstOrDefault().Value as string ?? method.Name)).Trim(),
+            command = "!" + string.Join(" ", Root(method.ContainingType).Append(command.ConstructorArguments.FirstOrDefault().Value as string ?? WrittenName(declaration) ?? method.Name)).Trim(),
             file = place.Path,
             line = place.StartLinePosition.Line + 1,
         });
@@ -131,7 +131,7 @@ foreach (var tree in trees)
         var line = declaration.GetLocation().GetLineSpan();
         commands.Add(new
         {
-            command = "!" + string.Join(" ", Root(method.ContainingType).Append(command.ConstructorArguments.FirstOrDefault().Value as string ?? method.Name)).Trim()
+            command = "!" + string.Join(" ", Root(method.ContainingType).Append(command.ConstructorArguments.FirstOrDefault().Value as string ?? WrittenName(declaration) ?? method.Name)).Trim()
                 + string.Concat(method.Parameters.Select(p => p.IsOptional ? $" [{p.Name}]" : $" <{p.Name}>")),
             file = line.Path,
             line = line.StartLinePosition.Line + 1,
@@ -382,6 +382,12 @@ static bool IsPlayerLevel(IMethodSymbol method)
     var permission = method.GetAttributes().Concat(method.ContainingType.GetAttributes()).FirstOrDefault(a => a.AttributeClass?.Name == "PermissionAttribute");
     return permission != null && permission.ConstructorArguments.FirstOrDefault().Value is int and 0;
 }
+
+// The name as written in [Command("...")], for when the attribute is ambiguous because both hosts are compiled together, so the
+// symbol has no constructor arguments. Without it the method's own name is used, which is not what Torch or Magnetar matches.
+static string? WrittenName(MethodDeclarationSyntax declaration) =>
+    declaration.AttributeLists.SelectMany(l => l.Attributes).FirstOrDefault(a => a.Name.ToString() is "Command" or "CommandAttribute")
+        ?.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax literal ? literal.Token.ValueText : null;
 
 static IEnumerable<string> Root(INamedTypeSymbol type)
 {
