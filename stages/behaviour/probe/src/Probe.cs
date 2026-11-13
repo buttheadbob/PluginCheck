@@ -92,6 +92,8 @@ public sealed class ProbeCore
     private int _resumeAt;
     private readonly List<string> _settingsApplied = new();
     private int _ticks;
+    // The wall clock at the first tick with the session ready, for probeTiming (behaviour/timing.py).
+    private DateTime _readyUtc;
     private int _startedAt = -1;
     private int _quiet;
     private bool _finished;
@@ -137,6 +139,8 @@ public sealed class ProbeCore
         if (_finished || MySession.Static == null || !MySession.Static.Ready)
             return;
         _ticks++;
+        if (_ticks == 1)
+            _readyUtc = DateTime.UtcNow;
         try
         {
             if (_startedAt >= 0)
@@ -342,6 +346,12 @@ public sealed class ProbeCore
     private void Finish(string json)
     {
         _finished = true;
+        // Wall seconds from the game being ready to this record, and the ticks counted in them: sim speed is game seconds per wall second.
+        double wall = _ticks > 0 ? (DateTime.UtcNow - _readyUtc).TotalSeconds : 0;
+        string speed = wall > 0 ? (_ticks / 60.0 / wall).ToString("0.###", CultureInfo.InvariantCulture) : "null";
+        string timing = "\"probeTiming\":{\"readySeconds\":" + wall.ToString("0.###", CultureInfo.InvariantCulture) + ",\"ticks\":" + _ticks.ToString(CultureInfo.InvariantCulture) + ",\"simSpeed\":" + speed + "}";
+        json = json.TrimEnd();
+        json = json.Length > 2 ? json.Substring(0, json.Length - 1) + "," + timing + "}" : "{" + timing + "}";
         File.WriteAllText(Path.Combine(MyFileSystem.UserDataPath, "probe.json"), json);
         MyLog.Default.WriteLineAndConsole("PROBE done");
     }
