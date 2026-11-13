@@ -54,7 +54,7 @@ IDLE_SECONDS = 120
 # All a plugin can tell about being on a cluster: PluginSdk's PluginCluster.IsClusterProcess reads the first, and PluginStorage the second. One process
 # with these is a cluster node to a plugin, with no gateway or other nodes, and a line that writes the shared folder stands in for another node.
 CLUSTER_NODE = ['-e', 'CLUSTER_NODE_ID=plugincheck', '-e', 'CLUSTER_SHARED_ROOT=/data/shared']
-COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection')
+COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection', 'enabled', 'functional', 'working', 'integrity', 'customData')
 # Measured on AutoStation: 16 servers on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
 CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
 # A server settles near 1 GB and peaked at 0.95 GiB when measured. This leaves room for the compile and world load at the start of each one.
@@ -73,7 +73,8 @@ magnetar_cache = None
 
 
 # What a target asks of this stage, all of it optional: legacy (run on MagnetarLegacy too), settleSeconds (wait this long after the
-# world is ready, for a plugin with a warm-up) and removeDuring (commands to run again with things taken out of the world part way through).
+# world is ready, for a plugin with a warm-up), removeDuring (commands to run again with things taken out of the world part way through)
+# and programmableBlocks (add what behaviour/programmable.py builds to its world).
 options = target.get('behaviour', {})
 
 
@@ -134,7 +135,7 @@ def copy_world_files():
     if done.returncode:
         finish('not run', reason='could not copy the game saves the fixture needs: ' + done.stderr[-300:])
     save = os.path.join(work, 'fixture')
-    fixture.build(out, os.path.join(out, 'moon.sbs'), save)
+    fixture.build(out, os.path.join(out, 'moon.sbs'), save, bool(options.get('programmableBlocks')))
     return save
 
 
@@ -515,7 +516,7 @@ def remember_magnetar_cache(folder):
 def tool_hash():
     """Everything of ours that shapes a result."""
     digest = hashlib.sha256()
-    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py')):
+    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py')):
         digest.update(open(os.path.join(here, path), 'rb').read())
     for folder in ('probe', 'torchprobe'):
         digest.update(classification.folder_hash(os.path.join(here, 'behaviour', folder)).encode())
@@ -541,7 +542,8 @@ REPEATS = max(2, int(os.environ.get('PLUGINCHECK_REPEATS', '2')))
 def job_key(build, batch, repeat):
     """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
     parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
-             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle'), p.get('node')] for p in batch], options.get('settleSeconds')]
+             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle'), p.get('node')] for p in batch], options.get('settleSeconds'),
+             bool(options.get('programmableBlocks'))]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -698,7 +700,8 @@ def undeclared(record, known):
     if '*' in writes:
         return []
     found = []
-    if touched(record) and 'grids' not in writes:
+    # A programmable block changes on its own, as scripts run and a plugin's limits catch up with them.
+    if [key for key in touched(record) if not key[0].startswith(('pb:', 'pb-'))] and 'grids' not in writes:
         found.append('grids')
     before, after = record.get('before', {}), record.get('after', {})
     if before.get('identities') != after.get('identities') and 'players' not in writes:
@@ -967,7 +970,7 @@ json.dump([dict(r) for r in records.values()], open(os.path.join(run_dir, 'behav
 # What every command said, for reading. Nothing here can tell a command that did its work from one that stopped at its first check. A person or an AI can.
 said = {}
 for (name, scenario, _), record in sorted(records.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
-    text = ' | '.join(replies_of(record))[:300].replace('\n', ' ')
+    text = ' | '.join(replies_of(record))[:3000 if options.get('programmableBlocks') else 300].replace('\n', ' ')
     said.setdefault(scenario, {}).setdefault(name, f"[{record['wrongArguments']}] {text}" if 'wrongArguments' in record else text)
 write(os.path.join(run_dir, 'behaviour-replies.txt'), ''.join(f'{scenario}\n' + ''.join(f'  {name}: {text}\n' for name, text in builds.items()) for scenario, builds in said.items()))
 

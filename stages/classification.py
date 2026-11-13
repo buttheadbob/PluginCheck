@@ -19,7 +19,7 @@ in fixture.py, and, once a scenario has a caller or online, ProbeCaller and Prob
 A line can also say settle (seconds after the world is ready before it runs), min (seconds to keep watching afterwards), settings (values for this line
 only, of any type), flip false (do not repeat this line with each on/off setting) and node true (run on Magnetar as a cluster node with a shared folder).
 Lines joined with " && " run one after the other on one server, so one command can set up the next. The probe has lines of its own for such a chain:
-probe:wait <seconds>, probe:sit <cockpit name> (seats the caller), probe:off <block name>, probe:file <path under the user data folder> (its text), probe:save,
+probe:wait <seconds>, probe:sit <cockpit name> (seats the caller), probe:off <block name>, probe:file <path under the user data folder> (its text), probe:storage <programmable block name> (the Storage the block holds), probe:recompile <block name>, probe:save,
 probe:sharedwrite <path under the plugin's shared folder> <text>, probe:sharedread <path> and probe:sharedremove <path>. The last three stand in for another node.
 
   "!economy give": {"reads": ["economy"], "writes": ["economy"], "settings": [], "why": "...", "examples": ["!economy give FixturePlayer 100"]},

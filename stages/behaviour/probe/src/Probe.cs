@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Text;
 using Sandbox.Engine.Physics;
 using Sandbox.Game.Entities;
+using Sandbox.Game.Entities.Blocks;
 using Sandbox.Game.Entities.Cube;
 using Sandbox.Game.GameSystems;
 using Sandbox.Game.GameSystems.BankingAndCurrency;
@@ -262,6 +263,9 @@ public sealed class ProbeCore
                 // A file under the server's user data folder, such as a plugin's config, as it is now.
                 string read = Path.Combine(MyFileSystem.UserDataPath, string.Join(" ", words.Skip(1)));
                 return line + ": " + (File.Exists(read) ? File.ReadAllText(read).Replace("\r", "").Replace("\n", " ") : "(no file)");
+            case "probe:storage":
+                MyProgrammableBlock stored = ProgrammableBlocks().First(b => b.CustomName.ToString() == words[1]);
+                return line + ": " + (typeof(MyProgrammableBlock).GetField("m_storageData", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(stored) ?? "(none)");
             case "probe:sit":
                 MyCockpit cockpit = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyCockpit>()).First(c => c.CustomName.ToString() == words[1]);
                 cockpit.AttachPilot(_seated?.Character ?? throw new InvalidOperationException("no caller to seat"), 0);
@@ -278,10 +282,16 @@ public sealed class ProbeCore
             MyAsyncSaving.Start();
             return line + ": ServerSaving=" + Lower(MySession.Static.ServerSaving);
         }
-        throw new InvalidOperationException("unknown probe line");
+        string name = line.Substring("probe:recompile ".Length);
+        MyProgrammableBlock block = ProgrammableBlocks().First(b => b.CustomName.ToString() == name);
+        typeof(MyProgrammableBlock).GetMethod("Recompile", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(block, new object[] { true });
+        return line + ": done";
     }
 
     private static string SharedFolder() => Directory.GetDirectories(Path.Combine(Environment.GetEnvironmentVariable("CLUSTER_SHARED_ROOT")!, "plugins")).Single();
+
+    private static List<MyProgrammableBlock> ProgrammableBlocks() =>
+        MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyProgrammableBlock>()).ToList();
 
     // Waits for the world to stop changing, since nothing says when a plugin has finished.
     private void Watch()
@@ -307,7 +317,7 @@ public sealed class ProbeCore
 
     private void Conclude(string after, string ended)
     {
-        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.SelectMany(lines => lines).Select(Quote)) + "],\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
+        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.SelectMany(lines => lines).Select(Quote)) + "],\"scripts\":" + Scripts() + ",\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
         _step++;
         if (_step < _steps.Count)
         {
@@ -468,6 +478,8 @@ public sealed class ProbeCore
                 name = (grid.DisplayName ?? "") + "#" + i;
             grids[name] = Describe(grid);
         }
+        foreach (MyProgrammableBlock block in ProgrammableBlocks())
+            grids["pb:" + block.CustomName] = DescribeBlock(block);
         int others = MyEntities.GetEntities().Count(e => e is not MyCubeGrid);
         return "{\"grids\":{" + string.Join(",", grids.Select(g => Quote(g.Key) + ":" + g.Value)) + "},\"otherEntities\":" + others
             + ",\"identities\":" + MySession.Static.Players.GetAllIdentities().Count + ",\"factions\":" + MySession.Static.Factions.Count() + "}";
@@ -481,6 +493,25 @@ public sealed class ProbeCore
             + ",\"owners\":" + Quote(string.Join(",", grid.BigOwners ?? new List<long>())) + ",\"parent\":" + Quote(parent?.DisplayName ?? "")
             + ",\"connection\":" + Quote(connection?.GetType().Name ?? "")
             + ",\"inGravity\":" + Lower(!Vector3D.IsZero(MyGravityProviderSystem.CalculateNaturalGravityInPoint(grid.PositionComp.GetPosition()))) + "}";
+    }
+
+    private static string DescribeBlock(MyProgrammableBlock block)
+    {
+        return "{\"enabled\":" + Lower(block.Enabled) + ",\"functional\":" + Lower(block.IsFunctional) + ",\"working\":" + Lower(block.IsWorking)
+            + ",\"integrity\":" + ((int)block.SlimBlock.Integrity).ToString(CultureInfo.InvariantCulture) + ",\"customData\":" + Quote(block.CustomData ?? "") + "}";
+    }
+
+    // What each script is doing. Not in Record, which is how the world counts as settled, because this changes on every run.
+    private static string Scripts()
+    {
+        const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+        return "{" + string.Join(",", ProgrammableBlocks().Select(block =>
+        {
+            bool running = typeof(MyProgrammableBlock).GetField("m_instance", Private)!.GetValue(block) != null;
+            object reason = typeof(MyProgrammableBlock).GetField("m_terminationReason", Private)!.GetValue(block)!;
+            string info = block.DetailedInfo.ToString();
+            return Quote(block.CustomName.ToString()) + ":" + Quote((running ? "running " : "no script ") + reason + " " + (info.Length > 300 ? info.Substring(0, 300) : info));
+        })) + "}";
     }
 
     private static string Quote(string text)

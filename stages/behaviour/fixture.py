@@ -159,13 +159,12 @@ def moon(text):
     return planet, centre, float(re.search(r'<Radius>([\d.]+)</Radius>', planet).group(1))
 
 
-def second_player(checkpoint, now):
+def add_player(checkpoint, now, identity_id, steam, name):
     """Copies the save's only player as one who logged out moments ago, so offline limits have both sides."""
     item = re.search(r'<AllPlayersData>\s*<dictionary>\s*(<item>.*?</item>)', checkpoint, re.S).group(1)
-    copy = (item.replace(str(OLD_PLAYER_STEAM), str(RECENT_PLAYER_STEAM)).replace(str(OLD_PLAYER), str(RECENT_PLAYER))
-            .replace('FixturePlayer', 'FixtureRecent'))
+    copy = item.replace(str(OLD_PLAYER_STEAM), str(steam)).replace(str(OLD_PLAYER), str(identity_id)).replace('FixturePlayer', name)
     checkpoint = checkpoint.replace(item, item + copy, 1)
-    identity = (f'<MyObjectBuilder_Identity><IdentityId>{RECENT_PLAYER}</IdentityId><DisplayName>FixtureRecent</DisplayName>'
+    identity = (f'<MyObjectBuilder_Identity><IdentityId>{identity_id}</IdentityId><DisplayName>{name}</DisplayName>'
                 f'<CharacterEntityId>0</CharacterEntityId><Model>Default_Astronaut</Model><BlockLimitModifier>0</BlockLimitModifier>'
                 f'<LastLoginTime>{now}</LastLoginTime><LastLogoutTime>{now}</LastLogoutTime></MyObjectBuilder_Identity>')
     return checkpoint.replace('</Identities>', identity + '</Identities>', 1)
@@ -177,13 +176,15 @@ def server_settings(text):
     return text.replace('<OnlineMode>OFFLINE</OnlineMode>', '<OnlineMode>PRIVATE</OnlineMode><TrashRemovalEnabled>false</TrashRemovalEnabled>')
 
 
-def build(empty_world, moon_sector, out):
+def build(empty_world, moon_sector, out, programmable_blocks=False):
     """Writes the fixture save to out, from copies of the game's Empty World and Moon Base saves."""
     os.makedirs(out, exist_ok=True)
     read = lambda name: open(os.path.join(empty_world, name), encoding='utf-8').read()
 
     planet, moon_position, moon_radius = moon(open(moon_sector, encoding='utf-8').read())
-    objects = planet + ''.join(world(moon_position, moon_radius))
+    import programmable
+    grids = world(moon_position, moon_radius) + (programmable.objects() if programmable_blocks else [])
+    objects = planet + ''.join(grids)
     sector = re.sub(r'<SectorObjects>.*</SectorObjects>', lambda _: f'<SectorObjects>{objects}</SectorObjects>', read('SANDBOX_0_0_0_.sbs'), flags=re.S)
 
     now = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
@@ -193,7 +194,8 @@ def build(empty_world, moon_sector, out):
     checkpoint = re.sub(r'<CharacterEntityId>\d+</CharacterEntityId>', '<CharacterEntityId>0</CharacterEntityId>', checkpoint)
     checkpoint = re.sub(r'<ClientId>\d+</ClientId>', f'<ClientId>{OLD_PLAYER_STEAM}</ClientId>', checkpoint)
     checkpoint = checkpoint.replace('Skinface', 'FixturePlayer').replace('<Connected>true</Connected>', '<Connected>false</Connected>')
-    checkpoint = second_player(checkpoint, now)
+    for identity, steam, name in [(RECENT_PLAYER, RECENT_PLAYER_STEAM, 'FixtureRecent')] + (list(programmable.PLAYERS) if programmable_blocks else []):
+        checkpoint = add_player(checkpoint, now, identity, steam, name)
     checkpoint = checkpoint.replace('</LastLoginTime>\n    </MyObjectBuilder_Identity>', '</LastLoginTime>\n      <LastLogoutTime>2016-12-19T15:09:41</LastLogoutTime>\n    </MyObjectBuilder_Identity>')
     checkpoint = re.sub(r'<NonPlayerIdentities\s*/>|<NonPlayerIdentities>.*?</NonPlayerIdentities>', f'<NonPlayerIdentities><long>{NPC}</long></NonPlayerIdentities>', checkpoint, flags=re.S)
 

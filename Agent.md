@@ -44,6 +44,7 @@ What a command touches is a judgement about its code, so it is yours to make. `b
    A permission, privacy or "in-game only" check needs a `player` line and an `admin` line, or it has not been tested. A `NO EXAMPLE` line in
    `behaviour` is a gap in your reading, unless the command needs a list setting the fixture does not have.
 5. Write example lines in the command's real case, as `commands` prints it. Torch does not find `!pblimiter getreport` for `!PBLimiter GetReport`.
+6. A plugin may act only on things some targets have, such as programmable blocks. Work out what its code needs in the world before a run, and when a test world is what leaves code unreached, report what closes the gap: what must exist, how many, owned by whom, what any script must do, which code each item reaches, and who can build it. If it can be built, it is built before the full run.
 
 Changing the world is not a reason to run alone. Commands share a server unless they overlap, so a command that pays a player and one that sets the
 weather can share. Use `"writes": ["*"]` only for a command that could reach anything, such as one that restarts the server.
