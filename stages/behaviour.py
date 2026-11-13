@@ -449,6 +449,13 @@ def run_server(build, batch, save, probe_zip):
             slots.put(cores)
 
 
+def container_log(container):
+    """What the container printed, its error output last, as the legacy stage keeps it. An entrypoint that stops (set -e) says why on stderr,
+    and the Last lines of a server that ended with no record come from this file."""
+    said = docker('logs', container)
+    return said.stdout + said.stderr
+
+
 def serve(build, batch, save, probe_zip, cores):
     """One disposable server for the scenarios that share it. Returns what the probe recorded for each, or why it could not."""
     number = next(counter)
@@ -489,7 +496,7 @@ def serve(build, batch, save, probe_zip, cores):
     # The record is written and the world is thrown away, so a clean shutdown only wastes the core. Torch ignores the signal under Proton
     # and would sit out the whole timeout. Logs flush as they are written, so nothing is lost.
     docker('kill', container)
-    open(os.path.join(folder, 'container.log'), 'w', encoding='utf-8').write(docker('logs', container).stdout)
+    open(os.path.join(folder, 'container.log'), 'w', encoding='utf-8').write(container_log(container))
     docker('cp', f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))
     if magnetar:
         docker('cp', f'{container}:/data/Magnetar/.', os.path.join(folder, 'magnetar'))
