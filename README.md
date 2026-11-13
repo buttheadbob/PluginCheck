@@ -183,7 +183,7 @@ join a test server, and a second one, ProbeTarget, is there to be acted on. Repl
 player's command skips `OnCommandExecuting`, so a plugin's own permission hook does not run. Settings that hold a list, such as auto commands
 and presets, start empty, so the commands that use them stop at "not found".
 
-Example lines use a command's real case, because Torch's are case sensitive. `stages/classification.py` has the details.
+Lines joined with ` && ` run on one server. Example lines use a command's real case, because Torch's are case sensitive. `stages/classification.py` has the details.
 
 **What it cannot prove:**
 - **Correctness.** No difference only means the builds agree, and both may be wrong.

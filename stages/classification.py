@@ -16,6 +16,9 @@ examples lists real ways to run a command, because a placeholder argument only r
 adds the online players without changing who runs it. The fixture's names are the only ones that exist: FixturePlayer, FixtureRecent, the grids
 in fixture.py, and, once a scenario has a caller or online, ProbeCaller and ProbeTarget, who are online with characters. With examples, only they run.
 
+Lines joined with " && " run one after the other on one server, so one command can set up the next. The probe has lines of its own for such a chain:
+probe:wait <seconds>.
+
   "!economy give": {"reads": ["economy"], "writes": ["economy"], "settings": [], "why": "...", "examples": ["!economy give FixturePlayer 100"]},
   "!economy top":  {"reads": ["economy"], "writes": [], "settings": ["PublicBalances"], "why": "...", "examples": [
     "!economy top", {"line": "!economy top", "caller": "player"}, {"line": "!economy top", "caller": "admin"}]}

@@ -81,7 +81,9 @@ public sealed class ProbeCore
     private object? _plugin;
     private string _before = "";
     private string _last = "";
-    private List<string> _replies = new();
+    private readonly List<List<string>> _replies = new();
+    private readonly Queue<string> _lines = new();
+    private int _resumeAt;
     private readonly List<string> _settingsApplied = new();
     private int _ticks;
     private int _startedAt = -1;
@@ -200,16 +202,39 @@ public sealed class ProbeCore
         _removed.Clear();
         if (_removals.Any(removal => removal.Step == _step && removal.Kind == "player"))
             AddPlayer();
-        _replies = command.Length > 0 ? _host.Run(command, CallerFor(_steps[_step].Caller)) : new List<string>();
+        _replies.Clear();
+        foreach (string line in command.Split(new[] { " && " }, StringSplitOptions.RemoveEmptyEntries))
+            _lines.Enqueue(line);
+        RunLines();
         _last = "";
         _quiet = 0;
         _startedAt = _ticks;
+    }
+
+    private void RunLines()
+    {
+        while (_lines.Count > 0)
+        {
+            string line = _lines.Dequeue();
+            if (line.StartsWith("probe:wait ", StringComparison.Ordinal))
+            {
+                _resumeAt = _ticks + int.Parse(line.Substring("probe:wait ".Length), CultureInfo.InvariantCulture) * 60;
+                return;
+            }
+            _replies.Add(_host.Run(line, CallerFor(_steps[_step].Caller)));
+        }
     }
 
     // Waits for the world to stop changing, since nothing says when a plugin has finished.
     private void Watch()
     {
         RemoveWhatIsDue();
+        if (_lines.Count > 0)
+        {
+            if (_ticks >= _resumeAt)
+                RunLines();
+            return;
+        }
         if ((_ticks - _startedAt) % CheckTicks != 0)
             return;
         string now = Record();
@@ -224,7 +249,7 @@ public sealed class ProbeCore
 
     private void Conclude(string after, string ended)
     {
-        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.Select(Quote)) + "],\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
+        _results.Add("{\"command\":" + Quote(_steps[_step].Command) + ",\"replies\":[" + string.Join(",", _replies.SelectMany(lines => lines).Select(Quote)) + "],\"removed\":[" + string.Join(",", _removed.Select(Quote)) + "],\"ended\":" + Quote(ended) + ",\"before\":" + _before + ",\"after\":" + after + "}");
         _step++;
         if (_step < _steps.Count)
         {
