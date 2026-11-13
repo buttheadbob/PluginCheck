@@ -11,6 +11,8 @@ The zip comes from the plugin's own Windows build, since .NET Framework plugins 
 """
 import glob, json, os, re, shutil, subprocess, sys, time
 from xml.sax.saxutils import escape
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin
 
 IMAGE = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
 TIMEOUT = 40 * 60
@@ -86,7 +88,7 @@ open(os.path.join(data, 'Instance', 'SpaceEngineers-Dedicated.cfg'), 'w', encodi
 </MyConfigDedicated>
 ''')
 
-subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS,
+subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS,
                 '-v', 'plugincheck-ds-torch:/ds', '-v', f'{volume}:/run-data',
                 '-v', f'{data}:/seed/data:ro', '-v', f'{plugins}:/seed/plugins:ro', IMAGE],
                check=True, stdout=subprocess.DEVNULL)

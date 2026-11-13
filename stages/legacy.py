@@ -16,6 +16,7 @@ from xml.sax.saxutils import escape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import githubtoken, startlog
+import pin
 
 IMAGE = os.environ.get('PLUGINCHECK_LEGACY_IMAGE', 'plugincheck-magnetar-legacy:latest')
 TIMEOUT = 45 * 60
@@ -130,7 +131,7 @@ write(os.path.join(data, 'Instance', 'SpaceEngineers-Dedicated.cfg'), f'''<?xml 
 ''')
 
 token_args, token_env = githubtoken.for_container()
-subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS, *token_args,
+subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS, *token_args,
                 '-v', 'plugincheck-ds-legacy:/ds', '-v', f'{volume}:/data', '-v', f'{data}:/seed:ro',
                 '-v', f'{os.path.join(base, "source")}:/plugin:ro', IMAGE],
                check=True, stdout=subprocess.DEVNULL, env=token_env)

@@ -7,6 +7,8 @@ MOTD bug shipped. Only lookups with a literal type and name can be checked. Ever
 is listed as unchecked, so a reader knows to trace it by hand.
 """
 import json, os, re, shutil, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin
 
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
 SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
@@ -72,7 +74,7 @@ if not lookups:
     finish('pass', checked=0, unchecked=unchecked)
 
 volume = next((v for v in ('plugincheck-ds-magnetar', 'plugincheck-ds-torch', 'plugincheck-ds-quasar')
-               if docker('run', '--rm', '-v', f'{v}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode == 0), None)
+               if docker('run', *pin.args(), '--rm', '-v', f'{v}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode == 0), None)
 if not volume:
     finish('not run', reason='no dedicated server volume yet. Run a loader stage first.', unchecked=unchecked)
 
@@ -80,7 +82,7 @@ shutil.copytree(os.path.join(here, 'reflectcheck'), os.path.join(work, 'src'), d
 json.dump(lookups, open(os.path.join(work, 'lookups.json'), 'w', encoding='utf-8'))
 command = ('set -e; cd /work/src; dotnet build -c Release -v q -nologo -o /work/out >/work/build.log 2>&1; '
            'dotnet /work/out/reflectcheck.dll /work/lookups.json /ds/DedicatedServer64')
-r = docker('run', '--rm', '--cpus', '4', '--memory', '4g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
+r = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '4g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
 try:
     results = json.loads(r.stdout.strip().splitlines()[-1])
 except (IndexError, ValueError):

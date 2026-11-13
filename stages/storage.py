@@ -9,6 +9,8 @@ delegate, or a loader's own config store is not seen.
 """
 import io, json, os, shutil, subprocess, sys, urllib.request, zipfile
 import xml.etree.ElementTree as ET
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = 'plugincheck-torch-proton:latest'
@@ -45,7 +47,7 @@ def copy_out(image, folder, into):
 
 
 volume = 'plugincheck-ds-magnetar'
-if docker('run', '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
+if docker('run', *pin.args(), '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
     finish('not run', reason='no dedicated server yet. Run the magnetar stage first.')
 
 folders = []
@@ -86,7 +88,7 @@ if 'torch' in target and docker('image', 'inspect', TORCH).returncode == 0 and c
 shutil.copytree(os.path.join(here, 'storagecheck'), os.path.join(work, 'src'), dirs_exist_ok=True)
 command = ('set -e; cd /work/src; dotnet build -c Release -v q -nologo -o /work/out >/work/build.log 2>&1; '
            f'dotnet /work/out/storagecheck.dll /work/sources.txt {" ".join(refs)} /ds/DedicatedServer64')
-r = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
+r = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
 try:
     report = json.loads(r.stdout.strip().splitlines()[-1])
 except (IndexError, ValueError):

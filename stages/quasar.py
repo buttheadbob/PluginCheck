@@ -21,6 +21,7 @@ TEST_ADMIN = '76561190000000000'
 TIMEOUT = 10 * 60
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
 import repocopy
+import pin
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -57,14 +58,14 @@ def test(version):
               f'dotnet build "{project}" -c Release -p:QuasarPluginAbstractionsAssembly={abstractions} -p:DeployToQuasar=false; '
               'echo PLUGINCHECK_BUILD_OK; cd /opt/quasar; exec /opt/quasar/Quasar')
     extra = []
-    packaged = docker('run', '--rm', '--entrypoint', 'cat', image, '/opt/quasar/release.json').stdout
+    packaged = docker('run', *pin.args(), '--rm', '--entrypoint', 'cat', image, '/opt/quasar/release.json').stdout
     workaround = version.startswith('1.4.1') and json.loads(packaged).get('version') != resolved
     if workaround:
         fixed = os.path.join(run_dir, f'release-{resolved}.json')
         json.dump({**json.loads(packaged), 'version': resolved}, open(fixed, 'w', encoding='utf-8'))
         extra = ['-v', f'{fixed}:/opt/quasar/release.json:ro']
 
-    subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '4', '--memory', '6g', '--entrypoint', 'bash', *extra,
+    subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--cpus', '4', '--memory', '6g', '--entrypoint', 'bash', *extra,
                     '-e', 'QUASAR_UI_PLUGIN_DIRS=/plugins', '-e', f'QUASAR_ADMIN_STEAM_ID={TEST_ADMIN}',
                     '-e', 'QUASAR_HOST_ID=plugincheck', '-e', 'QUASAR_LOG_MIN_LEVEL=Info',
                     '-v', f'{os.path.join(run_dir, "quasar-source")}:/plugins',

@@ -248,6 +248,33 @@ Each call prints the session's leases as JSON. Keep calling `request` or `heartb
 container with `docker run --cpuset-cpus <cores> --name <container> ...`. The rules are in `stages/leases.py`, tested without
 Docker by `python -m unittest discover -s tests`.
 
+## Pre-container lane
+A run can be split in two, so that everything before `behaviour` happens while another run's `behaviour` still has the machine:
+
+```
+python check.py <target> --pre
+python check.py <target> --continue <run folder>
+```
+
+**`--pre`:**
+- Runs every stage except `behaviour` and `logcheck`, plus `behaviour`'s discovery of every build, one stage at a time, on one slot
+  of PluginCheck's own.
+- The slot is a lease as the session `plugincheck-pre` (`stages/leases.py`, `Lane`). It's granted when one of the running
+  `behaviour` stage's servers finishes, or at once with no run going.
+- It counts against neither borrower limit, so with 3 sessions borrowing 2 slots each, a run keeps 16 - 6 - 1 = 9.
+- Every container the lane starts is pinned to the slot's cores (`stages/pin.py`).
+- An exclusive request makes the lane finish the stage it is on, give the slot back, and wait.
+- The slot goes back as soon as the lane's half ends.
+- It keeps the run folder's data, and writes `pre.json`:
+  - `ready`, or `failed` with the reasons: `manifest` or `lint` failed, discovery didn't pass, or the commands have no current reading;
+  - the plugin's, PluginCheck's, the game's and the target's hashes.
+
+**`--continue`:**
+- Runs `behaviour` and `logcheck` in that same folder, finding the discoveries in the results cache, then clears the data as a run does.
+- It refuses a folder whose `pre.json` isn't `ready`, or whose plugin, PluginCheck stages, game or target changed since.
+
+Both halves are one run, and nothing is reused across runs. `lease.py` refuses the lane's session name.
+
 ## Isolation
 Nothing is shared between systems, so an update or a layout change in one cannot affect another:
 

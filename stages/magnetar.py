@@ -13,6 +13,7 @@ from xml.sax.saxutils import escape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import githubtoken, startlog
+import pin
 
 IMAGE = 'ghcr.io/cometworks/magnetar:latest'
 TIMEOUT = 45 * 60
@@ -40,7 +41,7 @@ checks = []
 
 def game_build():
     """A hash of the game's main assembly. Magnetar's core plugins are compiled against it, so a cache only holds for one build."""
-    found = subprocess.run(['docker', 'run', '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', IMAGE, '/ds/DedicatedServer64/Sandbox.Game.dll'],
+    found = subprocess.run(['docker', 'run', *pin.args(), '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', IMAGE, '/ds/DedicatedServer64/Sandbox.Game.dll'],
                            capture_output=True, text=True).stdout.split()
     return found[0][:16] if found else None
 
@@ -158,7 +159,7 @@ seed()
 seed_world()
 restore_downloads()
 token_args, token_env = githubtoken.for_container()
-subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *token_args,
+subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--user', '0:0', '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *token_args,
                 '-e', 'DS_DIR=/ds', '-e', f'SERVER_NAME=PluginCheck {name}',
                 '-v', 'plugincheck-ds-magnetar:/ds',
                 '-v', f'{volume}:/data', '-v', f'{data}:/seed:ro',

@@ -26,6 +26,10 @@ Servers run side by side, each pinned to its own CORES_PER_SERVER logical cores 
 out from what Docker can see. PLUGINCHECK_BEHAVIOUR_WORKERS overrides it, and PLUGINCHECK_BEHAVIOUR_CORES sets the cores each.
 
 PLUGINCHECK_BEHAVIOUR_ONLY limits a run to scenarios containing that text, or any of several separated by ||, for working on this stage.
+
+In the pre-container lane (check.py --pre, README), PLUGINCHECK_BEHAVIOUR_DISCOVER_ONLY stops the stage once every build is discovered and
+the scenarios are made, on the one slot PLUGINCHECK_CPUSET names, without acting as the owner of any slot. check.py --continue then runs it
+in full, and finds those discoveries in the results cache.
 """
 import atexit, concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
@@ -35,6 +39,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
 import classification, extraplugins, fixture, githubtoken, leases, serverhash, startlog, timing as server_timing
+import pin
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -61,6 +66,7 @@ COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection', 'ena
 CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
 # A server settles near 1 GB and peaked at 0.95 GiB when measured. This leaves room for the compile and world load at the start of each one.
 MEMORY_PER_SERVER_GIB = 1.8
+DISCOVER_ONLY = bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_DISCOVER_ONLY'))
 
 sys.stdout.reconfigure(line_buffering=True)
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -111,7 +117,13 @@ def read_text(path):
 
 
 def capacity():
-    """How many servers fit side by side, and which logical cores each gets, from what Docker can really use."""
+    """How many servers fit side by side, and which logical cores each gets, from what Docker can really use. In the pre-container lane,
+    one server at a time on the lane's own slot."""
+    if os.environ.get('PLUGINCHECK_CPUSET'):
+        print(f"the pre-container lane: one server at a time, on cores {os.environ['PLUGINCHECK_CPUSET']}")
+        slots = queue.Queue()
+        slots.put(os.environ['PLUGINCHECK_CPUSET'])
+        return 1, slots
     info = docker('info', '--format', '{{.NCPU}} {{.MemTotal}}').stdout.split()
     cores, memory = (int(info[0]), int(info[1]) // 2 ** 30) if len(info) == 2 else (CORES_PER_SERVER, MEMORY_PER_SERVER_GIB)
     fits = max(min(cores // CORES_PER_SERVER, int(memory / MEMORY_PER_SERVER_GIB)), 1)
@@ -130,7 +142,7 @@ def copy_world_files():
     """The game's own saves that the fixture starts from."""
     out = os.path.join(work, 'world-source')
     os.makedirs(out, exist_ok=True)
-    done = docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '-v', f'{out}:/out', '--entrypoint', 'bash', SDK, '-c',
+    done = docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '-v', f'{out}:/out', '--entrypoint', 'bash', SDK, '-c',
                   'cp "/ds/Content/CustomWorlds/Empty World/"SANDBOX_0_0_0_.sbs "/ds/Content/CustomWorlds/Empty World/"Sandbox*.sbc /out/ && '
                   'cp "/ds/Content/CustomWorlds/Moon Base/PC/SANDBOX_0_0_0_.sbs" /out/moon.sbs && '
                   'cp "/ds/Content/CustomWorlds/Moon Base/PC/"*.vx2 /out/' +
@@ -157,7 +169,7 @@ def build_torch_probe():
     source = os.path.join(work, 'probe-source')
     shutil.copytree(os.path.join(here, 'behaviour', 'torchprobe'), os.path.join(source, 'torchprobe'), dirs_exist_ok=True)
     shutil.copytree(os.path.join(here, 'behaviour', 'probe'), os.path.join(source, 'probe'), dirs_exist_ok=True)
-    made = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{VOLUMES["torch"]}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
+    made = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{VOLUMES["torch"]}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
                   'set -e; cd /work/probe-source/torchprobe; dotnet build -c Release -v q -nologo -p:LibFolder=/work/torch-libs '
                   '-p:GameFolder=/ds/DedicatedServer64 -o /work/probe-out >/work/probe-build.log 2>&1')
     dll = os.path.join(work, 'probe-out', PROBE + '.dll')
@@ -626,7 +638,7 @@ def tool_hash():
 
 
 def game_hash(host):
-    found = docker('run', '--rm', '-v', f'{VOLUMES[host]}:/ds:ro', '--entrypoint', 'sha256sum', SDK, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
+    found = docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES[host]}:/ds:ro', '--entrypoint', 'sha256sum', SDK, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
     return found[0][:16] if found else 'unknown'
 
 
@@ -854,7 +866,7 @@ def disagreements(first, second):
 
 if 'magnetar' not in target and 'torch' not in target:
     finish('not present', reason='this stage runs Magnetar and Torch plugins')
-if docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
+if docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
     finish('not run', reason='no dedicated server yet. Run the magnetar stage first.')
 
 shutil.rmtree(work, ignore_errors=True)
@@ -862,7 +874,8 @@ os.makedirs(work)
 workers, slots = capacity()
 # Slots other sessions borrowed before this run started stay theirs until they come back.
 all_slots = list(slots.queue)
-lending = leases.Lending(lambda: leases.Owner(all_slots), say=lambda text: print(text, flush=True))
+# The lane's slot is lent to it by a run that owns the rest, so the lane never acts as an owner.
+lending = leases.Lending(None if DISCOVER_ONLY else lambda: leases.Owner(all_slots), say=lambda text: print(text, flush=True))
 # On every way out, finish() and a crash too, so other sessions do not wait on a run that has ended.
 atexit.register(lending.stop)
 already_lent = lending.lent_at_start
@@ -892,7 +905,7 @@ save = copy_world_files()
 # The magnetar stage has already downloaded what Magnetar needs, so no server here has to ask GitHub for it again.
 # Failing that, what an earlier run kept for this game build.
 already = os.path.join(run_dir, 'data', 'Magnetar', 'GitHub')
-hashed = docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'sha256sum', MAGNETAR, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
+hashed = docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'sha256sum', MAGNETAR, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
 kept = os.path.normpath(os.path.join(here, '..', 'cache', 'magnetar-github', hashed[0][:16])) if hashed else ''
 for source in (already, kept):
     if source and os.path.isdir(source) and any(os.path.isdir(os.path.join(source, n, 'Bin')) for n in os.listdir(source)):
@@ -999,6 +1012,9 @@ if known is None:
     print('No current AI reading of these commands, so each one gets its own server. See the CLASSIFY lines from the commands stage.')
 else:
     print(f'{len(known)} commands classified, so those that do not overlap share a server')
+if DISCOVER_ONLY:
+    finish('pass', discoverOnly=True, reason='every build discovered; check.py --continue runs the scenarios', scenarios=len(plans),
+           commands=sum(len(r.get('commands', [])) for r in discovered.values()), reading=known is not None, buildsLeftOut=broken)
 jobs = []
 skipped = []
 for build in usable:

@@ -7,6 +7,8 @@ overwrites a repeated path without saying so. This runs after the Magnetar stage
 compiled there, with the PluginSdk from the same image and the dedicated server from Magnetar's own volume.
 """
 import glob, json, os, re, shutil, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
@@ -63,7 +65,7 @@ if copied.returncode or harmony.returncode:
 command = ('set -e; cd /work/src; '
            'dotnet build -c Release -v q -nologo -o /work/out -p:PluginSdkPath=/work/PluginSdk.dll >/work/build.log 2>&1; '
            'dotnet /work/out/regcheck.dll /work/plugin.dll /ds/DedicatedServer64')
-r = docker('run', '--rm', '--cpus', '4', '--memory', '4g', '--network', 'none' if os.path.isdir(os.path.join(work, 'out')) else 'bridge',
+r = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '4g', '--network', 'none' if os.path.isdir(os.path.join(work, 'out')) else 'bridge',
            '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
 output = r.stdout + r.stderr
 print(output.strip())

@@ -32,6 +32,7 @@ WORLD = os.environ.get('PLUGINCHECK_WORLD')
 UI_PORT = 18080
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
 import repocopy
+import pin
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -74,7 +75,7 @@ def write(path, value):
 
 def start(label, image, script, extra=()):
     container = f'plugincheck-quasarmanaged-{label}-{stamp}'
-    subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *extra,
+    subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *extra,
                     '-e', f'QUASAR_ADMIN_STEAM_ID={TEST_ADMIN}',
                     '-e', 'QUASAR_HOST_ID=plugincheck', '-e', 'QUASAR_LOG_MIN_LEVEL=Info',
                     '-v', f'{volume}:/data', '-v', f'plugincheck-ds-quasar:{DS}',
@@ -127,7 +128,7 @@ if WORLD:
     shutil.copytree(WORLD, os.path.join(seed, 'Magnetars', SERVER, 'DedicatedServer', 'Saves', 'World'))
 docker('volume', 'create', 'plugincheck-ds-quasar')
 docker('volume', 'create', volume)
-copied = docker('run', '--rm', '--entrypoint', 'bash', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
+copied = docker('run', *pin.args(), '--rm', '--entrypoint', 'bash', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
                 f'ghcr.io/cometworks/quasar:{LATEST}', '-c', 'cp -r /seed/. /data/')
 if copied.returncode:
     finish('not run', reason='could not seed the data volume: ' + copied.stderr[:300])
@@ -135,7 +136,7 @@ if copied.returncode:
 # 1. The migration receipt.
 image = f'ghcr.io/cometworks/quasar:{BRIDGE}'
 docker('pull', image)
-packaged = json.loads(docker('run', '--rm', '--entrypoint', 'cat', image, '/opt/quasar/release.json').stdout)
+packaged = json.loads(docker('run', *pin.args(), '--rm', '--entrypoint', 'cat', image, '/opt/quasar/release.json').stdout)
 fixed = os.path.join(work, 'release.json')
 json.dump({**packaged, 'version': BRIDGE}, open(fixed, 'w', encoding='utf-8'))
 container = start('receipt', image, 'exec /opt/quasar/Quasar', ('-e', 'QUASAR_PRESERVE_SERVERS_ON_SHUTDOWN=false', '-v', f'{fixed}:/opt/quasar/release.json:ro'))
@@ -147,7 +148,7 @@ if not wrote:
 # 2. The managed runtime. Only the first run downloads it.
 latest = f'ghcr.io/cometworks/quasar:{LATEST}'
 exe = f'{DS}/DedicatedServer64/Sandbox.Game.dll'
-if docker('run', '--rm', '--entrypoint', 'test', '-v', f'plugincheck-ds-quasar:{DS}', latest, '-f', exe).returncode:
+if docker('run', *pin.args(), '--rm', '--entrypoint', 'test', '-v', f'plugincheck-ds-quasar:{DS}', latest, '-f', exe).returncode:
     print('Installing the managed runtime, which only the first run does', flush=True)
     container = start('install', latest, 'exec /opt/quasar/Quasar')
     installed = wait(container, lambda: run(container, f'test -f {exe}').returncode == 0)

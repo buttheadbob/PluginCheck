@@ -24,6 +24,7 @@ older config file of the plugin under test.
 import io, os, re, shutil, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
+import pin
 
 
 def fetch(repo, ref, cache):
@@ -144,7 +145,7 @@ def torch_plugin(spec, cache, work, docker, sdk, torch_libs, ds_volume):
         return zip_path, guid, name
     build = os.path.join(out, 'build')
     assembly = torch_project(source, folder, build)
-    made = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{source}:/work/source:ro', '-v', f'{build}:/work/build', '-v', f'{torch_libs}:/work/torch:ro',
+    made = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{source}:/work/source:ro', '-v', f'{build}:/work/build', '-v', f'{torch_libs}:/work/torch:ro',
                   '-v', f'{ds_volume}:/ds:ro', '--entrypoint', 'bash', sdk, '-c', 'cd /work/build; dotnet build -c Release -v q -nologo -o /work/build/out > /work/build/build.log 2>&1')
     dll = os.path.join(build, 'out', assembly + '.dll')
     if made.returncode or not os.path.exists(dll):

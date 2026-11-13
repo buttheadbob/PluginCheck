@@ -1,13 +1,16 @@
 """Runs the plugin checks in containers and writes one results file. See README.md.
 
 usage: python check.py <target> [--only manifest,scan,...] [--skip torch,...] [--keep] [--hold] [--refresh]
+       python check.py <target> --pre                    the pre-container lane's half of a run (README, Pre-container lane)
+       python check.py <target> --continue <run folder>  the rest of that run: behaviour and logcheck
 """
-import argparse, datetime, glob, hashlib, json, os, shutil, subprocess, sys, threading, time
+import argparse, atexit, contextlib, datetime, glob, hashlib, json, os, shutil, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'stages'))
 from display import Display, STATUS_MARK, clock
-import classification, githubtoken, mountdepth
+import classification, githubtoken, leases, mountdepth, prerun
+import pin
 
 STAGES = {
     # Need no server at all.
@@ -68,21 +71,42 @@ parser.add_argument('--skip', default='')
 parser.add_argument('--keep', action='store_true', help='keep run data such as worlds and source copies')
 parser.add_argument('--refresh', action='store_true', help='ignore what earlier runs kept: results, the thread catalog and the source of other plugins')
 parser.add_argument('--hold', action='store_true', help='leave the managed Quasar running afterwards, on 127.0.0.1:18080')
+parser.add_argument('--pre', action='store_true', help="every stage before behaviour, and behaviour's discovery, on one slot of PluginCheck's own")
+parser.add_argument('--continue', dest='resume', metavar='RUN_DIR', help='behaviour and logcheck, in the folder of a run started with --pre')
 args = parser.parse_args()
+if (args.pre or args.resume) and (args.pre and args.resume or args.only or args.skip or args.hold):
+    parser.error('--pre and --continue are the two halves of one whole run, so they take no --only, --skip or --hold, nor each other')
 
 target = json.load(open(os.path.join(HERE, 'targets', args.target + '.json'), encoding='utf-8'))
 # Targets name their repo relative to this folder, so they work wherever the folders are cloned side by side.
 target['repo'] = os.path.normpath(os.path.join(HERE, target['repo']))
 if not os.path.isdir(target['repo']):
     sys.exit(f"{target['repo']} does not exist. Clone the plugin next to PluginCheck.")
-run_dir = os.path.join(HERE, 'runs', target['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+if args.resume:
+    run_dir = os.path.abspath(args.resume)
+    if not os.path.isfile(os.path.join(run_dir, 'results.json')):
+        sys.exit(f'{run_dir} is not a run folder.')
+else:
+    run_dir = os.path.join(HERE, 'runs', target['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
 # A folder too deep for Docker Desktop's mounts makes every Legacy and Torch server exit at start (stages/mountdepth.py).
 too_deep = mountdepth.problem(run_dir)
 if too_deep:
     sys.exit(too_deep)
-os.makedirs(run_dir)
+if not args.resume:
+    os.makedirs(run_dir)
 target_file = os.path.join(run_dir, 'target.json')
-json.dump(target, open(target_file, 'w', encoding='utf-8'), indent=1)
+if not args.resume:
+    json.dump(target, open(target_file, 'w', encoding='utf-8'), indent=1)
+
+# The pre-container lane runs on one slot of PluginCheck's own, held as a lease, and every container it starts is pinned to it (stages/pin.py).
+lane = None
+if args.pre:
+    lane = leases.Lane(leases.machine_cores(), say=lambda text: print(text, flush=True))
+    print(f'waiting for the pre-container lane\'s slot ({leases.LANE})...', flush=True)
+    os.environ['PLUGINCHECK_CPUSET'] = lane.acquire()
+    # Also on an early exit, so the slot never waits out the 5-minute lease limit.
+    atexit.register(lane.release)
+    print(f"the lane holds cores {os.environ['PLUGINCHECK_CPUSET']}", flush=True)
 if args.hold:
     os.environ['PLUGINCHECK_HOLD'] = '1'
 if args.refresh:
@@ -91,6 +115,11 @@ if args.refresh:
 only = {s for s in args.only.split(',') if s}
 skip = {s for s in args.skip.split(',') if s}
 results = {'target': target['name'], 'started': datetime.datetime.now().isoformat(timespec='seconds'), 'stages': {}}
+if args.resume:
+    # The first half's stages are this run's own, done already. Behaviour's discovery-only result gives way to the whole stage.
+    results = json.load(open(os.path.join(run_dir, 'results.json'), encoding='utf-8'))
+    results['stages'] = {s: o for s, o in results['stages'].items() if s not in (ALONE, LAST)}
+    results['continued'] = datetime.datetime.now().isoformat(timespec='seconds')
 
 
 def needed(stage):
@@ -123,15 +152,19 @@ def past_seconds():
 
 past = past_seconds()
 planned = [s for s in STAGES if needed(s) and not ((only and s not in only) or s in skip)]
+if args.pre:
+    planned = [s for s in planned if s != LAST]
+elif args.resume:
+    planned = [s for s in planned if s in (ALONE, LAST)]
 results_path = os.path.join(run_dir, 'results.json')
 run_started = time.time()
 lock = threading.Lock()
-begun, finished_stages = {}, set()
+begun, finished_stages = {}, set(results['stages'])
 
 
 def game_build():
     """A hash of the game's main assembly, or None before anything has installed it. On a first run the code stages have nothing to read."""
-    found = subprocess.run(['docker', 'run', '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', 'mcr.microsoft.com/dotnet/sdk:10.0',
+    found = subprocess.run(['docker', 'run', *pin.args(), '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', 'mcr.microsoft.com/dotnet/sdk:10.0',
                             '/ds/DedicatedServer64/Sandbox.Game.dll'], capture_output=True, text=True).stdout.split()
     return found[0][:16] if found else None
 
@@ -139,6 +172,13 @@ def game_build():
 game = game_build()
 code_first = game is not None
 plugin_files = classification.folder_hash(target['repo'])
+inputs = {'source': plugin_files, 'tools': prerun.tools_hash(HERE), 'game': game, 'target': prerun.target_hash(target)}
+if args.resume:
+    pre_path = os.path.join(run_dir, 'pre.json')
+    pre = json.load(open(pre_path, encoding='utf-8')) if os.path.isfile(pre_path) else None
+    refused = prerun.problems(pre, inputs)
+    if refused:
+        sys.exit(f'{run_dir} cannot be continued: ' + ' '.join(refused))
 
 
 def needs(stage):
@@ -250,11 +290,17 @@ def run_stage(stage):
         command.append(run_dir)
     command.append(result_file)
 
-    start = time.time()
-    with open(os.path.join(run_dir, stage + '.log'), 'w', encoding='utf-8') as log:
+    env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PLUGINCHECK_SECONDS_AFTER': str(int(max((seconds_from(c) for c in after[stage]), default=0)))}
+    # In the lane, one stage at a time on its slot, and behaviour only discovers.
+    with (lane.stage() if lane else contextlib.nullcontext()) as cores, open(os.path.join(run_dir, stage + '.log'), 'w', encoding='utf-8') as log:
+        # Timed from here, so a stage that waited for the lane's slot does not count the wait as its own time.
+        start = time.time()
+        if lane:
+            env['PLUGINCHECK_CPUSET'] = cores
+            if stage == ALONE:
+                env['PLUGINCHECK_BEHAVIOUR_DISCOVER_ONLY'] = '1'
         # Unbuffered, so a stage's lines arrive as they happen and its log can be followed while it runs.
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace',
-                                   env={**os.environ, 'PYTHONUNBUFFERED': '1', 'PLUGINCHECK_SECONDS_AFTER': str(int(max((seconds_from(c) for c in after[stage]), default=0)))})
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', env=env)
         last_line, finished = [time.time()], threading.Event()
         threading.Thread(target=heartbeat, args=(stage, start, last_line, finished), daemon=True).start()
         for line in process.stdout:
@@ -308,23 +354,36 @@ def when_ready(stage):
 
 
 for stage in STAGES:
+    if stage in results['stages']:
+        continue
     if not needed(stage):
         results['stages'][stage] = {'status': 'not present'}
     elif stage not in planned:
         results['stages'][stage] = {'status': 'not run'}
 
-workers = [threading.Thread(target=when_ready, args=(s,), daemon=True) for s in planned]
-for worker in workers:
-    worker.start()
-for worker in workers:
-    worker.join()
+try:
+    workers = [threading.Thread(target=when_ready, args=(s,), daemon=True) for s in planned]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+finally:
+    # The lane's slot goes back to the run that lent it, or to the machine, as soon as its half is done.
+    if lane:
+        lane.release()
 results['stages'] = {s: results['stages'][s] for s in STAGES if s in results['stages']}
 
 path = results_path
 json.dump(results, open(path, 'w', encoding='utf-8'), indent=1)
+if args.pre:
+    pre = prerun.record(results['stages'], classification.load(target['name'], target['repo']) is not None, inputs)
+    json.dump(pre, open(os.path.join(run_dir, 'pre.json'), 'w', encoding='utf-8'), indent=1)
+    display.line(f"pre-container lane: {pre['status']}" + (': ' + '; '.join(pre['reasons']) if pre['reasons'] else
+                 f'. Continue it with: python check.py {args.target} --continue "{run_dir}"'))
 
 # Each stage keeps its own logs. These folders are server installs and source copies, and add up to gigabytes per run.
-if not args.keep and not args.hold:
+# The lane's half keeps them, since behaviour and logcheck read them when the run continues.
+if not args.keep and not args.hold and not args.pre:
     for folder in ('data', 'source', 'quasar-data', 'quasar-source', 'upstream', 'regcheck', 'torch-data', 'torch-plugins', 'managed', 'legacy', 'behaviour', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'storage', 'lint'):
         shutil.rmtree(os.path.join(run_dir, folder), ignore_errors=True)
 
