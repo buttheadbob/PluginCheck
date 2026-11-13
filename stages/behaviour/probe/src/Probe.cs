@@ -353,6 +353,20 @@ public sealed class ProbeCore
         json = json.TrimEnd();
         json = json.Length > 2 ? json.Substring(0, json.Length - 1) + "," + timing + "}" : "{" + timing + "}";
         File.WriteAllText(Path.Combine(MyFileSystem.UserDataPath, "probe.json"), json);
+        // A copy in the folder behaviour.py mounts beside the instance folder, so it sees the record without asking Docker. The record above
+        // stays the one it reads. Not inside the instance folder: Docker would create that folder as root, and Torch and Legacy run as a user.
+        string marker = Path.Combine(Path.GetDirectoryName(MyFileSystem.UserDataPath.TrimEnd('\\', '/')) ?? MyFileSystem.UserDataPath, "marker");
+        if (Directory.Exists(marker))
+        {
+            try
+            {
+                File.WriteAllText(Path.Combine(marker, "probe.json"), json);
+            }
+            catch (Exception e)
+            {
+                MyLog.Default.WriteLineAndConsole("PROBE marker not written: " + e.Message);
+            }
+        }
         MyLog.Default.WriteLineAndConsole("PROBE done");
     }
 

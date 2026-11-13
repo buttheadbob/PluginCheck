@@ -157,7 +157,9 @@ plugin does and records the result. It needs nothing written by a person, and ru
    the commands gives each one real example lines, and who runs them: the console, a player or an Admin. A command with no example has its
    arguments filled in by type, which only reaches its first check, so it is listed as `NO EXAMPLE`.
 3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
-   probe has its record.
+   probe has its record. Its cores go back at the kill, and its logs are copied and its container removed while the next server starts.
+   The probe also copies its record into a small folder mounted from this computer, so the wait sees it without asking Docker. Docker is
+   asked every 5 seconds instead of every second, for a record the copy missed, a Torch fatal error, or a server that ended.
 4. **Compares:** the published build against each working build, and the working builds against each other.
 
 Published builds come from the repositories listed on MagnetarHub and QuasarHub, and from torchapi.com, into `cache/behaviour`. A plugin
@@ -205,7 +207,7 @@ The world has no programmable blocks unless a target asks for them, and on a wor
 - **Legacy.** Only Magnetar Interim and Torch run this stage.
 
 ### Timing
-Every server prints one `timing` line in `behaviour.log` when its slot is freed. It gives the seconds from getting the slot until each point: the container is up, the game is ready, the record appears (or the server stops without one), it is killed, it is cleaned up, and its slot is freed. It also gives the wait for the slot before that, and the sim speed: game seconds per wall second while the probe ran, where 1 is full speed. The same numbers are in each record's `timing` field, and the probe's own numbers are in `probeTiming`. Game ready is worked out back from the record using the probe's own time span, so the container's clock doesn't have to match the host's. These numbers are for measuring only: no comparison reads them. A result kept for later runs is saved without them, so a reused result has no `timing` or `probeTiming`.
+Every server prints one `timing` line in `behaviour.log` when its slot is freed. It gives the seconds from getting the slot until each point: the container is up, the game is ready, the record appears (or the server stops without one), it is killed, its slot is freed, and it is cleaned up. It also gives the wait for the slot before that, and the sim speed: game seconds per wall second while the probe ran, where 1 is full speed. The same numbers are in each record's `timing` field, and the probe's own numbers are in `probeTiming`. Game ready is worked out back from the record using the probe's own time span, so the container's clock doesn't have to match the host's. These numbers are for measuring only: no comparison reads them. A result kept for later runs is saved without them, so a reused result has no `timing` or `probeTiming`.
 
 ## Lending slots to other sessions
 The behaviour stage runs its servers in slots of two logical cores each. Other sessions can borrow some of them for in-game work,

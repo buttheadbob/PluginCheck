@@ -1,17 +1,18 @@
 """Where one behaviour server's time went, as one line in behaviour.log and a "timing" field on its records.
 
 behaviour.py notes the host clock at each point: queued (the job was handed to the pool), slot (it got its cores), up (the container
-started), stopped (the record appeared, or the server ended without one), killed, cleaned (logs copied, container and volume removed)
-and freed (the cores went back to the run or to a borrower). The probe adds "probeTiming": the wall seconds from the game being ready to
-the record, and the game ticks in that time, so sim speed is game seconds per wall second (1.0 is full speed).
+started), stopped (the record appeared, or the server ended without one), killed, freed (the cores went back to the run or to a
+borrower, right after the kill) and cleaned (logs copied, container and volume removed). The probe adds "probeTiming": the wall seconds
+from the game being ready to the record, and the game ticks in that time, so sim speed is game seconds per wall second (1.0 is full speed).
 
 Game ready is worked out from the probe's own span, back from the moment the record was seen, so the container's clock never has to agree
-with the host's. The record is seen within about a second of being written (the wait checks once a second).
+with the host's. The record is seen within half a second of being written when the probe's copy reaches the mounted marker folder, and
+within behaviour.py's CHECK_SECONDS when only Docker finds it.
 
 Nothing here changes what a server does or what is compared: compare() reads only "after", "before", "replies" and the like.
 """
 
-POINTS = ('up', 'stopped', 'killed', 'cleaned', 'freed')
+POINTS = ('up', 'stopped', 'killed', 'freed', 'cleaned')
 # Measured for one server on one run. A kept result is reused by a later run, where these would read as that run's own.
 FIELDS = ('timing', 'probeTiming')
 
@@ -49,7 +50,7 @@ def summary(timing, probe_timing=None):
         parts.append(f'game ready {ready:g}s')
     if 'stoppedSeconds' in out:
         parts.append(f"{timing.get('state') or 'stopped'} {out['stoppedSeconds']:g}s")
-    for point, label in (('killed', 'killed'), ('cleaned', 'cleaned up'), ('freed', 'slot freed')):
+    for point, label in (('killed', 'killed'), ('freed', 'slot freed'), ('cleaned', 'cleaned up')):
         if point + 'Seconds' in out:
             parts.append(f"{label} {out[point + 'Seconds']:g}s")
     if 'simSpeed' in out:
