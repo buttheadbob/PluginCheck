@@ -187,6 +187,33 @@ record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagr
 - **Settings that work together.** On/off settings flip one at a time, and other kinds of setting are not changed.
 - **Legacy.** Only Magnetar Interim and Torch run this stage.
 
+## Lending slots to other sessions
+The behaviour stage runs its servers in slots of two logical cores each. Other sessions can borrow some of them for in-game work,
+such as mod or Torch fixes. They may not borrow them to check another plugin: that is a PluginCheck run.
+
+- A session borrows at most 2 slots, and at most 3 sessions borrow at once, so a run always keeps the rest.
+- A slot is handed over only when one of PluginCheck's servers finishes in it. A running server is never stopped. With no run
+  going, a request is granted at once.
+- The borrower pins its container to the lease's cores and names it `<session>-<n>`, never `plugincheck-*`.
+- A lease with no heartbeat for 5 minutes ends. If its container still runs, the slot stays out of use until it stops.
+  PluginCheck never stops another session's container.
+- An exclusive request, for measurements that need a quiet machine, drains everything: no new lease and no new PluginCheck
+  server. It is granted, as cores `all`, once nothing else runs.
+
+The leases are one file, `machine/leases.json` in this folder (`PLUGINCHECK_MACHINE_DIR` moves it), changed under a
+lock. Sessions use `lease.py`:
+
+```
+python lease.py request   --session NAME --count 2 --purpose "mod fix test"
+python lease.py heartbeat --session NAME        # at least every minute while working
+python lease.py release   --session NAME [--cores 4-5]
+python lease.py status
+```
+
+Each call prints the session's leases as JSON. Keep calling `request` or `heartbeat` until the count is reached, then start each
+container with `docker run --cpuset-cpus <cores> --name <container> ...`. The rules are in `stages/leases.py`, tested without
+Docker by `python -m unittest discover -s tests`.
+
 ## Isolation
 Nothing is shared between systems, so an update or a layout change in one cannot affect another:
 

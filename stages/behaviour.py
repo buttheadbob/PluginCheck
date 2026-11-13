@@ -27,14 +27,14 @@ out from what Docker can see. PLUGINCHECK_BEHAVIOUR_WORKERS overrides it, and PL
 
 PLUGINCHECK_BEHAVIOUR_ONLY limits a run to scenarios containing that text, for working on this stage.
 """
-import concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
+import atexit, concurrent.futures, glob, hashlib, io, itertools, json, os, queue, re, shutil, subprocess, sys, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, fixture, githubtoken, startlog
+import classification, fixture, githubtoken, leases, startlog
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -387,13 +387,30 @@ def start_torch(build, seed, folder, container, volume, cores):
 
 
 def run_server(build, batch, save, probe_zip):
+    # An exclusive lease, for a measurement that needs the machine quiet, holds every new server back until it is released.
+    while not lending.may_start():
+        time.sleep(10)
     cores = slots.get()
+    with running_lock:
+        running[0] += 1
     status(kind='server', cores=cores, build=build['name'], scenario=' + '.join(p.get('name', 'discover') for p in batch))
     try:
         return serve(build, batch, save, probe_zip, cores)
     finally:
         status(kind='done', cores=cores)
-        slots.put(cores)
+        with running_lock:
+            running[0] -= 1
+        # A finished server's slot goes to a session waiting to borrow one, or back to the run (README, Lending slots).
+        # Lending.free never raises, and gives None on an error, so the slot stays the run's and serve()'s result stands.
+        try:
+            lease = lending.free(cores)
+        except Exception as error:
+            lending.note('free', error)
+            lease = None
+        if lease:
+            print(f"  lent {cores} to {lease.get('session')} ({lease.get('container')})", flush=True)
+        else:
+            slots.put(cores)
 
 
 def serve(build, batch, save, probe_zip, cores):
@@ -680,6 +697,34 @@ if docker('run', '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 
 shutil.rmtree(work, ignore_errors=True)
 os.makedirs(work)
 workers, slots = capacity()
+# Slots other sessions borrowed before this run started stay theirs until they come back.
+all_slots = list(slots.queue)
+lending = leases.Lending(lambda: leases.Owner(all_slots), say=lambda text: print(text, flush=True))
+# On every way out, finish() and a crash too, so other sessions do not wait on a run that has ended.
+atexit.register(lending.stop)
+already_lent = lending.lent_at_start
+if already_lent:
+    kept = [c for c in list(slots.queue) if c not in already_lent]
+    slots = queue.Queue()
+    for c in kept:
+        slots.put(c)
+    print(f"{len(already_lent)} slots are lent to other sessions, so {len(kept)} are this run's for now", flush=True)
+running, running_lock = [0], threading.Lock()
+
+
+def keep_lending():
+    # Lending.beat never raises, and this catch is a second guard: the thread must live, or lent slots never come back.
+    while True:
+        try:
+            for cores in lending.beat(running[0]):
+                print(f'  {cores} came back from a borrower', flush=True)
+                slots.put(cores)
+        except Exception as error:
+            lending.note('keep_lending', error)
+        time.sleep(5)
+
+
+threading.Thread(target=keep_lending, daemon=True).start()
 save = copy_world_files()
 # The magnetar stage has already downloaded what Magnetar needs, so no server here has to ask GitHub for it again.
 # Failing that, what an earlier run kept for this game build.
