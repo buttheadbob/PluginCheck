@@ -268,12 +268,14 @@ def scenario_file(build, batch):
     lines += [f'set:{k}={v}' for k, v in batch[0].get('settings', {}).items()]
     if options.get('settleSeconds') and batch[0].get('mode') != 'discover':
         lines.append(f"settle={options['settleSeconds']}")
+    if any(plan.get('players') for plan in batch):
+        lines.append('players=1')
     for step, plan in enumerate(batch):
         lines += [f"remove={step}|{r['after']}|{r['kind']}|{r['name']}" for r in plan.get('removals', [])]
     for plan in batch:
         # A command read as changing nothing has nothing to wait for.
         minimum, quiet = (2, 3) if plan.get('readonly') else (plan.get('min', 10), 10)
-        lines.append(f"step={minimum}|{quiet}|{plan.get('command', '')}")
+        lines.append(f"step={minimum}|{quiet}|{plan.get('caller', '')}|{plan.get('command', '')}")
     return '\n'.join(lines) + '\n'
 
 
@@ -283,6 +285,7 @@ def dedicated_config(world_path):
   <SessionSettings>
     <GameMode>Survival</GameMode>
     <OnlineMode>PRIVATE</OnlineMode>
+    <TrashRemovalEnabled>false</TrashRemovalEnabled>
     <MaxPlayers>4</MaxPlayers>
   </SessionSettings>
   <IP>0.0.0.0</IP>
@@ -534,7 +537,7 @@ REPEATS = max(2, int(os.environ.get('PLUGINCHECK_REPEATS', '2')))
 def job_key(build, batch, repeat):
     """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
     parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
-             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals')] for p in batch], options.get('settleSeconds')]
+             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players')] for p in batch], options.get('settleSeconds')]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -613,12 +616,14 @@ def generate(discovered, relevant, examples):
             lines = examples.get(command['line'].lower())
             if lines:
                 for e in lines:
-                    commands.setdefault(e['line'].lower(), e['line'])
+                    caller = e.get('caller', '')
+                    name = e['line'].lower() + (f' as {caller}' if caller else '')
+                    commands.setdefault(name, {'command': e['line'], 'caller': caller, 'players': bool(caller or e.get('online'))})
             else:
                 if any(not p['optional'] for p in command['parameters']):
                     no_example.add(command['line'])
                 for line in command_lines(command):
-                    commands.setdefault(line.lower(), line)
+                    commands.setdefault(line.lower(), {'command': line, 'caller': '', 'players': False})
         for setting in found.get('settings', []):
             if setting['type'] == 'Boolean':
                 settings.setdefault(setting['name'], str(setting['default'].lower() != 'true').lower())
@@ -626,12 +631,12 @@ def generate(discovered, relevant, examples):
     removing = options.get('removeDuring', {})
     plans += [{'name': f'{line} while removing', 'command': line, 'min': removing.get('minSeconds', 10), 'removals': removing['remove']}
               for line in removing.get('commands', [])]
-    for key, line in sorted(commands.items()):
-        plans.append({'name': key, 'command': line})
-        reads = relevant.get(classification.best_match(line, relevant))
+    for key, call in sorted(commands.items()):
+        plans.append({'name': key, **call})
+        reads = relevant.get(classification.best_match(call['command'], relevant))
         for name, value in sorted(settings.items()):
             if reads is None or name in reads:
-                plans.append({'name': f'{key} with {name}={value}', 'command': line, 'settings': {name: value}})
+                plans.append({'name': f'{key} with {name}={value}', **call, 'settings': {name: value}})
     only = os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')
     return [p for p in plans if only.lower() in p['name'].lower()] if only else plans
 

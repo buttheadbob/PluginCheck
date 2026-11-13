@@ -12,11 +12,13 @@ so changed code needs reading again. With no current classification, every comma
 settings lists every on/off setting the command's code can reach, so only those get flipped. Leave it out to flip all of them.
 
 examples lists real ways to run a command, because a placeholder argument only reaches its first check. Each is a line, or
-{"line": "..."}. The fixture's names are the only ones that exist: FixturePlayer, FixtureRecent and the grids in fixture.py.
-With examples, only they run.
+{"line": "...", "caller": "player" or "admin", "online": true}. A caller runs it as an online player of that rank instead of the console. online
+adds the online players without changing who runs it. The fixture's names are the only ones that exist: FixturePlayer, FixtureRecent, the grids
+in fixture.py, and, once a scenario has a caller or online, ProbeCaller and ProbeTarget, who are online with characters. With examples, only they run.
 
   "!economy give": {"reads": ["economy"], "writes": ["economy"], "settings": [], "why": "...", "examples": ["!economy give FixturePlayer 100"]},
-  "!economy top":  {"reads": ["economy"], "writes": [], "settings": ["PublicBalances"], "why": "...", "examples": ["!economy top"]}
+  "!economy top":  {"reads": ["economy"], "writes": [], "settings": ["PublicBalances"], "why": "...", "examples": [
+    "!economy top", {"line": "!economy top", "caller": "player"}, {"line": "!economy top", "caller": "admin"}]}
 
 Changing the world is not a reason to run alone. Commands share a server unless they overlap: one writes something another reads or writes.
 reads and writes name what the command depends on or changes, in any useful words: grids, players, factions, economy, weather, voxels,
@@ -126,7 +128,8 @@ def batches(plans, known):
     """
     groups = {}
     for plan in plans:
-        groups.setdefault(tuple(sorted(plan.get('settings', {}).items())), []).append(plan)
+        # Online players change what every command in a server sees, so scenarios with them do not share with those without.
+        groups.setdefault((tuple(sorted(plan.get('settings', {}).items())), bool(plan.get('players'))), []).append(plan)
     out = []
     for group in groups.values():
         # So does a scenario that removes things, because that would reach anything sharing its server.

@@ -9,11 +9,13 @@ using System.Text;
 using Sandbox.Engine.Physics;
 using Sandbox.Game.Entities;
 using Sandbox.Game.GameSystems;
+using Sandbox.Game.GameSystems.BankingAndCurrency;
 using Sandbox.Game.Multiplayer;
 using Sandbox.Game.World;
 using VRage;
 using VRage.FileSystem;
 using VRage.Game.Entity;
+using VRage.Game.ModAPI;
 using VRage.Utils;
 using VRageMath;
 
@@ -36,12 +38,21 @@ public sealed class Removal
     public bool Done;
 }
 
+/// <summary>The online player a command runs as. With none, it runs as the server's console.</summary>
+public sealed class Caller
+{
+    public ulong SteamId;
+    public long IdentityId;
+    public string Name = "";
+    public MyPromoteLevel Level;
+}
+
 /// <summary>What differs between hosts: the plugin's commands, and how to run one.</summary>
 public interface IProbeHost
 {
     object? FindPlugin(string name);
     IEnumerable<CommandInfo> Commands(object plugin);
-    List<string> Run(string line);
+    List<string> Run(string line, Caller? caller);
 }
 
 /// <summary>Discovers a plugin, or runs its scenarios in turn and records the world before and after each. Everything here runs on the
@@ -50,12 +61,16 @@ public sealed class ProbeCore
 {
     private const int CheckTicks = 60;
     private const int ProbePlayerSerial = 77;
+    private const ulong CallerSteamId = 76561190000000003;
+    private const ulong TargetSteamId = 76561190000000004;
 
     private readonly IProbeHost _host;
     private string _mode = "";
     private string _pluginName = "";
     private int _maxSeconds = 600;
-    private readonly List<(string Command, int MinSeconds, int QuietChecks)> _steps = new();
+    private readonly List<(string Command, int MinSeconds, int QuietChecks, string Caller)> _steps = new();
+    private bool _addPlayers;
+    private MyPlayer? _callerPlayer;
     private readonly List<string> _results = new();
     private readonly List<Removal> _removals = new();
     private readonly List<string> _removed = new();
@@ -142,7 +157,40 @@ public sealed class ProbeCore
             return;
         }
 
+        if (_addPlayers)
+        {
+            _callerPlayer = OnlinePlayer(CallerSteamId, "ProbeCaller");
+            OnlinePlayer(TargetSteamId, "ProbeTarget");
+        }
+
         Begin(Record());
+    }
+
+    // No real client can join a test server, so a client is made up. Replies never reach it, and the hosts capture them instead.
+    private static MyPlayer OnlinePlayer(ulong steamId, string name)
+    {
+        Sync.Clients.AddClient(steamId, name);
+        // A saved player keeps its identity, because blocks in the world belong to it.
+        long saved = MySession.Static.Players.TryGetIdentityId(steamId);
+        MyIdentity identity = saved != 0 ? MySession.Static.Players.TryGetIdentity(saved) : MySession.Static.Players.CreateNewIdentity(name);
+        MyPlayer player = MySession.Static.Players.CreateNewPlayer(identity, new MyPlayer.PlayerId(steamId, 0), name, true, false, true);
+        MyBankingSystem.Static.CreateAccount(identity.IdentityId);
+        // Clear of every grid in the fixture, whose first row starts at 1000, 1000, 1000.
+        player.SpawnAt(MatrixD.CreateWorld(new Vector3D(1000, 1400, 1000 + (long)(steamId % 10) * 20)), Vector3.Zero, null, null);
+        return player;
+    }
+
+    private Caller? CallerFor(string level)
+    {
+        if (level.Length == 0)
+            return null;
+        // Running this as the console instead would pass every permission check, and look like a test of them.
+        if (_callerPlayer == null)
+            throw new InvalidOperationException("a scenario asked for a " + level + " caller, but no player was added");
+        MyPromoteLevel promote = level == "admin" ? MyPromoteLevel.Admin : MyPromoteLevel.None;
+        // Written directly, because SetUserPromoteLevel only tells clients, and there are none.
+        MySession.Static.PromotedUsers[CallerSteamId] = promote;
+        return new Caller { SteamId = CallerSteamId, IdentityId = _callerPlayer.Identity.IdentityId, Name = _callerPlayer.DisplayName, Level = promote };
     }
 
     private void Begin(string before)
@@ -152,7 +200,7 @@ public sealed class ProbeCore
         _removed.Clear();
         if (_removals.Any(removal => removal.Step == _step && removal.Kind == "player"))
             AddPlayer();
-        _replies = command.Length > 0 ? _host.Run(command) : new List<string>();
+        _replies = command.Length > 0 ? _host.Run(command, CallerFor(_steps[_step].Caller)) : new List<string>();
         _last = "";
         _quiet = 0;
         _startedAt = _ticks;
@@ -270,9 +318,10 @@ public sealed class ProbeCore
             else if (key == "plugin") _pluginName = value;
             else if (key == "step")
             {
-                string[] parts = value.Split(new[] { '|' }, 3);
-                _steps.Add((parts[2], int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture)));
+                string[] parts = value.Split(new[] { '|' }, 4);
+                _steps.Add((parts[3], int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture), parts[2]));
             }
+            else if (key == "players") _addPlayers = value == "1";
             else if (key.StartsWith("set:", StringComparison.Ordinal)) _settings[key.Substring(4)] = value;
         }
     }

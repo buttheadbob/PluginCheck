@@ -8,7 +8,7 @@ using VRage.Plugins;
 
 namespace PluginCheckProbe;
 
-/// <summary>The probe on Magnetar. It runs commands the way Quasar's console does, as the server, with no player.</summary>
+/// <summary>The probe on Magnetar. It runs commands the way Quasar's console does, as the server with no player, or as an online player.</summary>
 // ReSharper disable once UnusedType.Global
 public class MagnetarProbe : IPlugin, IProbeHost
 {
@@ -57,11 +57,13 @@ public class MagnetarProbe : IPlugin, IProbeHost
         }
     }
 
-    public List<string> Run(string line)
+    public List<string> Run(string line, Caller? caller)
     {
         var replies = new Replies();
-        var console = new CommandCaller(0UL, 0L, "PluginCheck", MyPromoteLevel.Owner, isConsole: true);
-        bool handled = ServerCommands.Execute(line, console, replies);
+        CommandCaller sender = caller == null
+            ? new CommandCaller(0UL, 0L, "PluginCheck", MyPromoteLevel.Owner, isConsole: true)
+            : new CommandCaller(caller.SteamId, caller.IdentityId, caller.Name, caller.Level, isConsole: false);
+        bool handled = ServerCommands.Execute(line, sender, replies);
         if (!handled)
             replies.Lines.Add("the command was not handled");
         return replies.Lines;

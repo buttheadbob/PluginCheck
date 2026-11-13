@@ -148,7 +148,7 @@ plugin does and records the result. It needs nothing written by a person, and ru
 
 1. **Discovers:** a probe plugin loads beside the plugin and reads its commands and settings, on Magnetar and on Torch.
 2. **Generates:** one idle run, then every command, on its own and with each on/off setting its code can reach flipped. The AI reading
-   the commands gives each one real example lines. A command with no example has its
+   the commands gives each one real example lines, and who runs them: the console, a player or an Admin. A command with no example has its
    arguments filled in by type, which only reaches its first check, so it is listed as `NO EXAMPLE`.
 3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
    probe has its record.
@@ -177,6 +177,11 @@ record in `behaviour-records.json`, and what every command said in `behaviour-re
 
 A finished server only proves that a server finished. Two builds that fail the same way agree, so a command that never ran fails the stage,
 and how far each command got has to be read from `behaviour-replies.txt`.
+
+Commands run as the console unless an example names a caller. A caller is a made-up online player with a character, because no real client can
+join a test server, and a second one, ProbeTarget, is there to be acted on. Replies are captured, since nothing could receive them. On Torch, a
+player's command skips `OnCommandExecuting`, so a plugin's own permission hook does not run. Settings that hold a list, such as auto commands
+and presets, start empty, so the commands that use them stop at "not found".
 
 Example lines use a command's real case, because Torch's are case sensitive. `stages/classification.py` has the details.
 

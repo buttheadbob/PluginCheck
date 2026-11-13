@@ -40,7 +40,8 @@ What a command touches is a judgement about its code, so it is yours to make. `b
 3. Write the file it names, as `stages/classification.py` describes. List what each command `reads` and `writes`, the on/off `settings` its code can
    reach, and the file and line that show it in `why`. Use the same word for the same thing across commands. Only listed settings get flipped, so
    follow the code all the way down, and leave `settings` out if you cannot tell.
-4. Give every command that takes a value real `examples`, using names that exist in the fixture. A `NO EXAMPLE` line in
+4. Give every command that takes a value real `examples`, using names that exist in the fixture, and a `caller` where the code acts on who ran it.
+   A permission, privacy or "in-game only" check needs a `player` line and an `admin` line, or it has not been tested. A `NO EXAMPLE` line in
    `behaviour` is a gap in your reading, unless the command needs a list setting the fixture does not have.
 5. Write example lines in the command's real case, as `commands` prints it. Torch does not find `!pblimiter getreport` for `!PBLimiter GetReport`.
 

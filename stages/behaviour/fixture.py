@@ -164,6 +164,12 @@ def second_player(checkpoint, now):
     return checkpoint.replace('</Identities>', identity + '</Identities>', 1)
 
 
+def server_settings(text):
+    """An Empty World save says OFFLINE, where the game makes everyone an Owner, so no permission check would ever refuse anyone. Trash removal is
+    off because it deletes small grids far from a player as soon as one is online."""
+    return text.replace('<OnlineMode>OFFLINE</OnlineMode>', '<OnlineMode>PRIVATE</OnlineMode><TrashRemovalEnabled>false</TrashRemovalEnabled>')
+
+
 def build(empty_world, moon_sector, out):
     """Writes the fixture save to out, from copies of the game's Empty World and Moon Base saves."""
     os.makedirs(out, exist_ok=True)
@@ -174,7 +180,7 @@ def build(empty_world, moon_sector, out):
     sector = re.sub(r'<SectorObjects>.*</SectorObjects>', lambda _: f'<SectorObjects>{objects}</SectorObjects>', read('SANDBOX_0_0_0_.sbs'), flags=re.S)
 
     now = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-    checkpoint = read('Sandbox.sbc')
+    checkpoint = server_settings(read('Sandbox.sbc'))
     checkpoint = re.sub(r'<ControlledEntities>.*?</ControlledEntities>', '<ControlledEntities><dictionary /></ControlledEntities>', checkpoint, flags=re.S)
     checkpoint = checkpoint.replace('<CameraController>Entity</CameraController>', '<CameraController>Spectator</CameraController>')
     checkpoint = re.sub(r'<CharacterEntityId>\d+</CharacterEntityId>', '<CharacterEntityId>0</CharacterEntityId>', checkpoint)
@@ -191,4 +197,4 @@ def build(empty_world, moon_sector, out):
         if name.endswith('.vx2'):
             shutil.copy(os.path.join(empty_world, name), out)
     # The compressed copy would win over the text one, so it is left behind.
-    open(os.path.join(out, 'Sandbox_config.sbc'), 'w', encoding='utf-8', newline='\n').write(read('Sandbox_config.sbc'))
+    open(os.path.join(out, 'Sandbox_config.sbc'), 'w', encoding='utf-8', newline='\n').write(server_settings(read('Sandbox_config.sbc')))

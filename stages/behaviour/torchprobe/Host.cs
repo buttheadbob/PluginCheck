@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Torch;
 using Torch.API;
 using Torch.API.Managers;
@@ -10,7 +11,7 @@ using Torch.Commands;
 
 namespace PluginCheckProbe
 {
-    /// <summary>The probe on Torch. It runs commands as Torch's own console does.</summary>
+    /// <summary>The probe on Torch. It runs commands as Torch's own console does, or as an online player.</summary>
     // ReSharper disable once UnusedType.Global
     public class TorchProbe : TorchPluginBase, IProbeHost
     {
@@ -62,14 +63,16 @@ namespace PluginCheckProbe
             }
         }
 
-        public List<string> Run(string line)
+        public List<string> Run(string line, Caller caller)
         {
             var replies = new List<string>();
             var manager = Torch.CurrentSession.Managers.GetManager<CommandManager>();
             string wrong = ArgumentsCheck(manager, line);
             if (wrong != null)
                 replies.Add(wrong);
-            if (!manager.HandleCommandFromServer(line, message => replies.Add(message.Message)))
+            if (caller != null)
+                RunAsPlayer(manager, line, caller, replies);
+            else if (!manager.HandleCommandFromServer(line, message => replies.Add(message.Message)))
                 replies.Add("the command was not handled");
             return replies;
         }
@@ -87,5 +90,23 @@ namespace PluginCheckProbe
         }
 
         private static string[] Words(string text) => text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+        // HandleCommand sends replies to the player's chat, where nothing can read them. This is the rest of what it does, with a context that keeps them.
+        private void RunAsPlayer(CommandManager manager, string line, Caller caller, List<string> replies)
+        {
+            Command command = manager.Commands.GetCommand(line.Substring(1), out string argText);
+            if (command == null)
+                replies.Add("the command was not handled");
+            else if (!manager.HasPermission(caller.SteamId, command))
+                replies.Add($"You need to be a {command.MinimumPromoteLevel} or higher to use that command.");
+            else
+            {
+                var args = Regex.Matches(argText, "(\"[^\"]+\"|\\S+)").Cast<Match>().Select(x => x.ToString().Replace("\"", "")).ToList();
+                var context = new ConsoleCommandContext(Torch, command.Plugin, caller.SteamId, argText, args);
+                context.OnResponse += message => replies.Add(message.Message);
+                if (!command.TryInvoke(context))
+                    replies.Add($"Invalid Syntax: {command.SyntaxHelp}");
+            }
+        }
     }
 }
