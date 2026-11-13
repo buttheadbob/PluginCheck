@@ -51,6 +51,9 @@ PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b10'
 TORCH_PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b11'
 START_TIMEOUT = 20 * 60
 IDLE_SECONDS = 120
+# All a plugin can tell about being on a cluster: PluginSdk's PluginCluster.IsClusterProcess reads the first, and PluginStorage the second. One process
+# with these is a cluster node to a plugin, with no gateway or other nodes, and a line that writes the shared folder stands in for another node.
+CLUSTER_NODE = ['-e', 'CLUSTER_NODE_ID=plugincheck', '-e', 'CLUSTER_SHARED_ROOT=/data/shared']
 COMPARED = ('isStatic', 'size', 'blocks', 'owners', 'parent', 'connection')
 # Measured on AutoStation: 16 servers on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
 CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
@@ -344,11 +347,11 @@ def seed_magnetar(build, seed, folder):
     write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('Z:\\data\\Instance\\Saves\\Fixture' if legacy else '/data/Instance/Saves/Fixture'))
 
 
-def start_magnetar(build, seed, folder, container, volume, cores):
+def start_magnetar(build, seed, folder, container, volume, cores, node=False):
     # Even with Magnetar's downloads cached, each server still asks GitHub for a little, and a run of many servers uses up the anonymous limit.
     token_args, token_env = githubtoken.for_container()
     subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
-                    '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour',
+                    '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour', *(CLUSTER_NODE if node else []),
                     '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
                     '-v', f'{os.path.join(folder, "source")}:/plugin:ro', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
                    check=True, stdout=subprocess.DEVNULL, env=token_env)
@@ -433,7 +436,7 @@ def serve(build, batch, save, probe_zip, cores):
         if build['host'] == 'legacy':
             start_legacy(seed, folder, container, volume, cores)
         else:
-            start_magnetar(build, seed, folder, container, volume, cores)
+            start_magnetar(build, seed, folder, container, volume, cores, any(p.get('node') for p in batch))
         instance, info = '/data/Instance', '/data/Magnetar/info.log'
     else:
         seed_torch(build, seed, folder, probe_zip)
@@ -538,7 +541,7 @@ REPEATS = max(2, int(os.environ.get('PLUGINCHECK_REPEATS', '2')))
 def job_key(build, batch, repeat):
     """What a result depends on. If any part of this changes, the server runs again. Fixed for the run, apart from the scenario."""
     parts = [build['name'], fingerprints[build['name']], tools, games[build['host']], repeat,
-             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle')] for p in batch], options.get('settleSeconds')]
+             [[p.get('command'), p.get('settings'), p.get('min'), p.get('removals'), p.get('caller'), p.get('players'), p.get('settle'), p.get('node')] for p in batch], options.get('settleSeconds')]
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -618,10 +621,10 @@ def generate(discovered, relevant, examples):
             if lines:
                 for e in lines:
                     caller = e.get('caller', '')
-                    timing = [f'{k} {e[k]}' for k in ('settle', 'min') if k in e] + [f'{k}={v}' for k, v in sorted(e.get('settings', {}).items())]
+                    timing = [f'{k} {e[k]}' for k in ('settle', 'min') if k in e] + [f'{k}={v}' for k, v in sorted(e.get('settings', {}).items())] + (['node'] if e.get('node') else [])
                     name = e['line'].lower() + (f' as {caller}' if caller else '') + (f" [{', '.join(timing)}]" if timing else '')
                     commands.setdefault(name, {'command': e['line'], 'caller': caller, 'players': bool(caller or e.get('online')),
-                                               **{k: e[k] for k in ('settle', 'min', 'settings', 'flip') if k in e}})
+                                               **{k: e[k] for k in ('settle', 'min', 'settings', 'flip', 'node') if k in e}})
             else:
                 if any(not p['optional'] for p in command['parameters']):
                     no_example.add(command['line'])
@@ -643,6 +646,11 @@ def generate(discovered, relevant, examples):
                 plans.append({'name': f'{key} with {name}={value}', **call, 'settings': {**call.get('settings', {}), name: value}})
     only = os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')
     return [p for p in plans if only.lower() in p['name'].lower()] if only else plans
+
+
+def runs_on(build, plan):
+    """Whether a build runs a scenario: it has what the scenario needs, and only Magnetar on Linux is a cluster node."""
+    return fits(discovered[build['name']], plan) and (build['host'] == 'magnetar' or not plan.get('node'))
 
 
 def fits(found, plan):
@@ -815,7 +823,7 @@ skipped = []
 for build in usable:
     fitting = []
     for plan in plans:
-        if fits(discovered[build['name']], plan):
+        if runs_on(build, plan):
             fitting.append(plan)
         else:
             skipped.append({'build': build['name'], 'scenario': plan['name']})
@@ -940,7 +948,7 @@ later = {r['scenario'] for r in records.values() if r.get('sharedAfter')}
 suspect = ({d['scenario'] for d in real} & later) | set(wrongly_classified)
 if suspect:
     print(f'{len(suspect)} scenarios that shared a server showed a difference, so they rerun alone before anything is reported', flush=True)
-    again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if fits(discovered[b['name']], by_name[n]) for r in range(REPEATS)]
+    again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if runs_on(b, by_name[n]) for r in range(REPEATS)]
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
         futures = {pool.submit(run_and_remember, b, [p], r): (b, r) for b, p, r in again}
         for future in concurrent.futures.as_completed(futures):

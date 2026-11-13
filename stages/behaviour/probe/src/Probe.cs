@@ -230,7 +230,7 @@ public sealed class ProbeCore
         }
     }
 
-    // A probe line that fails, such as one naming a block the world does not have, says so in its replies, and the scenario carries on.
+    // A build that has no shared folder, such as one from before a plugin supported clusters, says so in its replies, and the scenario carries on.
     private static string TryProbeAction(string line)
     {
         try
@@ -243,12 +243,17 @@ public sealed class ProbeCore
         }
     }
 
-    // What a client or an autosave does, which a scenario has no other way to cause.
+    // What a client, an autosave or another node does, which a scenario has no other way to cause.
     private static string ProbeAction(string line)
     {
         string[] words = line.Split(new[] { ' ' }, 3);
         switch (words[0])
         {
+            case "probe:sharedwrite":
+                string path = Path.Combine(SharedFolder(), words[1]);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, words[2]);
+                return line + ": done";
             case "probe:off":
                 MyFunctionalBlock off = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyFunctionalBlock>()).First(b => b.CustomName.ToString() == words[1]);
                 off.Enabled = false;
@@ -261,6 +266,11 @@ public sealed class ProbeCore
                 MyCockpit cockpit = MyEntities.GetEntities().OfType<MyCubeGrid>().SelectMany(grid => grid.GetFatBlocks().OfType<MyCockpit>()).First(c => c.CustomName.ToString() == words[1]);
                 cockpit.AttachPilot(_seated?.Character ?? throw new InvalidOperationException("no caller to seat"), 0);
                 return line + ": " + (cockpit.Pilot != null ? "seated" : "not seated");
+            case "probe:sharedread":
+                return line + ": " + File.ReadAllText(Path.Combine(SharedFolder(), words[1]));
+            case "probe:sharedremove":
+                Directory.Delete(Path.Combine(SharedFolder(), words[1]), true);
+                return line + ": done";
         }
 
         if (line == "probe:save")
@@ -270,6 +280,8 @@ public sealed class ProbeCore
         }
         throw new InvalidOperationException("unknown probe line");
     }
+
+    private static string SharedFolder() => Directory.GetDirectories(Path.Combine(Environment.GetEnvironmentVariable("CLUSTER_SHARED_ROOT")!, "plugins")).Single();
 
     // Waits for the world to stop changing, since nothing says when a plugin has finished.
     private void Watch()
