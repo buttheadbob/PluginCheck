@@ -11,6 +11,13 @@ so changed code needs reading again. With no current classification, every comma
 
 settings lists every on/off setting the command's code can reach, so only those get flipped. Leave it out to flip all of them.
 
+examples lists real ways to run a command, because a placeholder argument only reaches its first check. Each is a line, or
+{"line": "..."}. The fixture's names are the only ones that exist: FixturePlayer, FixtureRecent and the grids in fixture.py.
+With examples, only they run.
+
+  "!economy give": {"reads": ["economy"], "writes": ["economy"], "settings": [], "why": "...", "examples": ["!economy give FixturePlayer 100"]},
+  "!economy top":  {"reads": ["economy"], "writes": [], "settings": ["PublicBalances"], "why": "...", "examples": ["!economy top"]}
+
 Changing the world is not a reason to run alone. Commands share a server unless they overlap: one writes something another reads or writes.
 reads and writes name what the command depends on or changes, in any useful words: grids, players, factions, economy, weather, voxels,
 plugin-config, plugin-files. The names only have to match between commands, so use the same word for the same thing. "*" means it could
@@ -60,6 +67,22 @@ def settings_read(name, repo):
     if data.get('source') != source_hash(repo):
         return {}
     return {line.lower(): set(entry['settings']) for line, entry in data.get('commands', {}).items() if 'settings' in entry}
+
+
+def examples(name, repo):
+    """The real lines each command was given, as {command: [{line, caller, online}]}. Empty when there is no reading for this source."""
+    try:
+        data = json.load(open(path_for(name), encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    if data.get('source') != source_hash(repo):
+        return {}
+    found = {}
+    for command, entry in data.get('commands', {}).items():
+        lines = [{'line': e} if isinstance(e, str) else e for e in entry.get('examples', [])]
+        if lines:
+            found[command.lower()] = lines
+    return found
 
 
 def best_match(command, known):

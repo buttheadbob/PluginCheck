@@ -40,6 +40,9 @@ What a command touches is a judgement about its code, so it is yours to make. `b
 3. Write the file it names, as `stages/classification.py` describes. List what each command `reads` and `writes`, the on/off `settings` its code can
    reach, and the file and line that show it in `why`. Use the same word for the same thing across commands. Only listed settings get flipped, so
    follow the code all the way down, and leave `settings` out if you cannot tell.
+4. Give every command that takes a value real `examples`, using names that exist in the fixture. A `NO EXAMPLE` line in
+   `behaviour` is a gap in your reading, unless the command needs a list setting the fixture does not have.
+5. Write example lines in the command's real case, as `commands` prints it. Torch does not find `!pblimiter getreport` for `!PBLimiter GetReport`.
 
 Changing the world is not a reason to run alone. Commands share a server unless they overlap, so a command that pays a player and one that sets the
 weather can share. Use `"writes": ["*"]` only for a command that could reach anything, such as one that restarts the server.

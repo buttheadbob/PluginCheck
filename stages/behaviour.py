@@ -604,13 +604,21 @@ def command_lines(command):
         yield ' '.join([base, *['true'] * len(switches)])
 
 
-def generate(discovered, relevant):
-    """One idle run, then every way to call every command, on its own and with each on/off setting flipped: those it reads, or all with no reading."""
+def generate(discovered, relevant, examples):
+    """One idle run, then every way to call every command, on its own and with each on/off setting flipped: those it reads, or all with no reading.
+    A command with real examples runs those. One without runs with placeholders, which only reach its first check if it takes a value."""
     commands, settings = {}, {}
     for found in discovered.values():
         for command in found.get('commands', []):
-            for line in command_lines(command):
-                commands.setdefault(line.lower(), line)
+            lines = examples.get(command['line'].lower())
+            if lines:
+                for e in lines:
+                    commands.setdefault(e['line'].lower(), e['line'])
+            else:
+                if any(not p['optional'] for p in command['parameters']):
+                    no_example.add(command['line'])
+                for line in command_lines(command):
+                    commands.setdefault(line.lower(), line)
         for setting in found.get('settings', []):
             if setting['type'] == 'Boolean':
                 settings.setdefault(setting['name'], str(setting['default'].lower() != 'true').lower())
@@ -630,8 +638,8 @@ def generate(discovered, relevant):
 
 def fits(found, plan):
     """Whether a build has what a scenario needs. A build without a command or setting cannot run it, and that is itself worth reading."""
-    lines = {c['line'].lower() for c in found.get('commands', [])}
-    if plan.get('command') and not any(plan['name'].startswith(l) for l in lines):
+    lines = [c['line'].lower() for c in found.get('commands', [])]
+    if plan.get('command') and not classification.best_match(plan['command'], lines):
         return False
     names = {s['name'] for s in found.get('settings', [])}
     return all(k in names for k in plan.get('settings', {}))
@@ -782,7 +790,10 @@ if working_broken:
     finish('not run', reason=f"{', '.join(working_broken)} could not be discovered, so nothing was run: {str(broken[working_broken[0]])[:400]}",
            discovered=discovered, buildsLeftOut=broken)
 
-plans = generate({n: r for n, r in discovered.items() if n not in broken}, classification.settings_read(target['name'], repo))
+no_example = set()
+plans = generate({n: r for n, r in discovered.items() if n not in broken}, classification.settings_read(target['name'], repo), classification.examples(target['name'], repo))
+for line in sorted(no_example):
+    print(f'NO EXAMPLE  {line} takes a value and has no real example, so it only reaches its first check. See classification.py.')
 print(f"{len(plans)} scenarios from {sum(len(r.get('commands', [])) for r in discovered.values())} commands and "
       f"{sum(len(r.get('settings', [])) for r in discovered.values())} settings", flush=True)
 known = classification.load(target['name'], repo)
@@ -944,12 +955,12 @@ for (name, scenario, _), record in sorted(records.items(), key=lambda item: (ite
 write(os.path.join(run_dir, 'behaviour-replies.txt'), ''.join(f'{scenario}\n' + ''.join(f'  {name}: {text}\n' for name, text in builds.items()) for scenario, builds in said.items()))
 
 unhandled = sum(len(v) for v in not_handled.values())
-print(f"{len(records)} results, {len(failures)} failed, {unhandled} never ran, {len(real)} differences, "
+print(f"{len(records)} results, {len(failures)} failed, {unhandled} never ran, {len(no_example)} commands with no example, {len(real)} differences, "
       f"{sum(d['unstable'] for d in real)} of them unstable, {len(quiet)} of {len(plans)} scenarios changed nothing in the world")
 print('Results say a server finished. To know how far each command got, read behaviour-replies.txt.')
 print('Each difference is a lead: it says two builds disagree, not which is right. No differences would say only that these scenarios agreed.')
 crashed = any('stack' in f['reason'].lower() for f in failures)
 finish('fail' if crashed or unhandled else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
        servers=len(jobs), reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
-       noChange=quiet, wrongArguments=wrong_arguments, notHandled=not_handled, skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
+       noChange=quiet, wrongArguments=wrong_arguments, notHandled=not_handled, noExample=sorted(no_example), skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
        note='A difference is a lead. No differences proves nothing beyond these scenarios.')

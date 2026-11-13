@@ -176,7 +176,8 @@ for x in report['everyCommand']:
 classified = classification.load(target['name'], repo)
 if classified is None:
     print(f"CLASSIFY  No current reading of these commands, so each one gets its own server. Read every handler below, then write "
-          f"{classification.path_for(target['name'])} with source {classification.source_hash(repo)}. See stages/classification.py.")
+          f"{classification.path_for(target['name'])} with source {classification.source_hash(repo)}, with real examples for every command "
+          f"that takes a value. See stages/classification.py.")
     for x in sorted(report['everyCommand'], key=lambda v: v['command'].lower()):
         print(f"CLASSIFY  {x['command']}  ({x['file']}:{x['line']})")
 else:
