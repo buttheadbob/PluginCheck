@@ -5,6 +5,7 @@ usage:
   python lease.py heartbeat --session NAME [--log PATH]
   python lease.py release   --session NAME [--cores 4-5]
   python lease.py status
+  python lease.py gate      --purpose TEXT [--timeout SECONDS] [--session NAME]
 
 request asks for slots and prints the leases this session holds, as JSON. A slot is granted when one of PluginCheck's servers
 finishes, or at once when no PluginCheck run is going, so call request or heartbeat again until the count is reached. Then run
@@ -20,11 +21,19 @@ request about every 30 seconds until the reply shows the lease, and send a heart
 Every reply carries exclusiveWaiting (an exclusive request waits: finish the container you are on, release, and ask again after
 it is done), exclusiveHeld, and, while one waits, waitingFor: what the drain still waits for. status adds unknownContainers: the
 running containers the lease file does not know, or null when Docker could not be asked.
+
+gate is for work that holds no lease: a session's build, test suite or live run calls it first. It waits while an exclusive request
+waits or holds, then exits 0. With --timeout it exits 3 once that many seconds pass with the gate still shut (0: look once), and
+names who claims the machine and since when. --session leaves that session's own claim out. It prints its waiting lines to stderr
+and one JSON line to stdout, starts nothing and changes nothing. Python callers import this file and call gate(purpose, timeout=...),
+which raises GateTimeout instead.
 """
 import argparse, json, os, sys, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stages'))
 import leases
+
+gate, GateTimeout = leases.gate, leases.GateTimeout
 
 
 def cores_of_machine():
@@ -51,16 +60,35 @@ def show(state, session=None, containers=leases.NOT_CHECKED, now=None):
     return shown
 
 
+def run_gate(purpose, timeout, session):
+    say = lambda text: print(text, file=sys.stderr, flush=True)
+    try:
+        waited = gate(purpose, timeout, session, say=say)
+    except GateTimeout as shut:
+        say(str(shut))
+        print(json.dumps({'gate': 'shut', 'purpose': purpose, 'claims': shut.claims}))
+        return 3
+    print(json.dumps({'gate': 'free', 'purpose': purpose, 'waitedSeconds': round(waited)}))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('action', choices=['request', 'heartbeat', 'release', 'status'])
+    parser.add_argument('action', choices=['request', 'heartbeat', 'release', 'status', 'gate'])
     parser.add_argument('--session')
     parser.add_argument('--count', type=int, default=1, choices=[1, 2])
     parser.add_argument('--purpose', default='')
     parser.add_argument('--exclusive', action='store_true')
     parser.add_argument('--cores')
     parser.add_argument('--log', help='a file this session writes for its work, which a viewer may show')
+    parser.add_argument('--timeout', type=float, help='gate: give up after this many seconds (0: look once)')
     args = parser.parse_args()
+    if args.action == 'gate':
+        if not args.purpose:
+            parser.error('gate needs --purpose: what waits, such as "Inertia build"')
+        if args.session and not leases.SESSION.match(args.session):
+            parser.error('--session: 1 to 64 letters, digits, "_", "." or "-", starting with a letter or digit')
+        return run_gate(args.purpose, args.timeout, args.session)
     if args.action != 'status' and not (args.session and leases.SESSION.match(args.session)):
         parser.error('--session is required: 1 to 64 letters, digits, "_", "." or "-", starting with a letter or digit')
     if args.session == leases.LANE:
@@ -81,4 +109,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

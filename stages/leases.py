@@ -18,6 +18,9 @@ PluginCheck's own pre-container lane (check.py --pre) takes one slot as the sess
 so with 3 sessions borrowing 2 slots each a run keeps 16 - 6 - 1 = 9. It is granted like any lease, gives its slot back when it
 ends, and steps aside for an exclusive request (Lane).
 
+Work that holds no lease, such as a session's build, test suite or live run, calls the machine gate first (gate, lease.py gate): it
+waits while an exclusive request waits or holds, so a measurement can claim the machine at once and waits only for work already running.
+
 Everything lives in one JSON file, changed under a lock, so any session can use it from the command line (lease.py) and
 PluginCheck from Python. The decisions are plain functions of the state and the time, so they are tested without Docker.
 """
@@ -294,8 +297,9 @@ def run_may_begin(state):
 # ---- The file, under a lock ----
 
 class Store:
-    def __init__(self, folder=FOLDER, wait=60):
-        self.folder, self.wait = folder, wait
+    def __init__(self, folder=FOLDER, wait=60, save=True):
+        """save=False only reads: the lock is taken and given back, and the file is left as it was."""
+        self.folder, self.wait, self.save = folder, wait, save
         self.path = os.path.join(folder, 'leases.json')
         self.lock = os.path.join(folder, 'leases.lock')
 
@@ -371,7 +375,7 @@ class Store:
     def __exit__(self, kind, error, trace):
         owned = (self.holder() or {}).get('token') == self.token
         try:
-            if kind is None and owned:
+            if kind is None and owned and self.save:
                 temporary = self.path + '.tmp'
                 with open(temporary, 'w', encoding='utf-8') as out:
                     json.dump(self.state, out, indent=1)
@@ -380,7 +384,7 @@ class Store:
             # Only a lock this holder still owns: one taken over as abandoned belongs to someone else now.
             if owned:
                 self.remove_lock()
-        if kind is None and not owned:
+        if kind is None and not owned and self.save:
             raise RuntimeError(f'{self.lock} was taken over, so this change was not saved')
         return False
 
@@ -821,3 +825,63 @@ class RunHold:
                 owner_grant_exclusive(state, now, 0, names)
         except Exception as error:
             self.note('ending the run', error)
+
+
+# ---- The machine gate: work outside PluginCheck waits while the machine is claimed (README, Machine gate) ----
+
+class GateTimeout(TimeoutError):
+    """The gate was still shut when its time ran out. The message names who claims the machine and since when; claims lists it."""
+
+    def __init__(self, message, claims):
+        super().__init__(message)
+        self.claims = claims
+
+
+def when(seconds):
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(seconds))
+
+
+def claims(state, now, session=None):
+    """What shuts the gate, in words, oldest first: each exclusive lease and each exclusive request. Empty when the machine is free.
+    A claim that has lapsed does not count, and neither does one of session, the caller's own. Worked out on a copy: nothing is changed."""
+    view = json.loads(json.dumps(state))
+    expire(view, now, running_check(None), alive=lambda pid: True)
+    mine = lambda item: item.get('exclusive') and item['session'] != session
+    purpose = lambda item: f" ({item['purpose']})" if item.get('purpose') else ''
+    said = [f"exclusive lease held by {l['session']}{purpose(l)} since {when(l['granted'])}"
+            for l in sorted(filter(mine, view['leases']), key=lambda l: l['granted'])]
+    # A holder that asks again (lease.py request until the reply shows the lease) leaves a request beside its lease: not a second claim.
+    holders = {l['session'] for l in view['leases'] if l.get('exclusive')}
+    waiting = sorted((r for r in view['requests'] if mine(r) and r['session'] not in holders), key=lambda r: r['since'])
+    if waiting:
+        running = (view.get('owner') or {}).get('servers', 0) if owner_active(view, now) else 0
+        blockers = exclusive_blockers(view, now, running)
+        said += [f"exclusive request by {r['session']}{purpose(r)} waiting since {when(r['since'])}"
+                 + (f", for: {'; '.join(blockers)}" if blockers else '') for r in waiting]
+    return said
+
+
+def gate(purpose, timeout=None, session=None, folder=FOLDER, clock=time.time, sleep=time.sleep, poll=10, report_every=300, say=print):
+    """Waits while an exclusive lease is held or waiting, then returns the seconds it waited. Any session's build, test suite or live run
+    calls it first, so a measurement that claimed the machine waits only for work already running. With timeout (seconds, 0 for one
+    look) it raises GateTimeout once that has passed with the gate still shut. session leaves the caller's own claim out. It starts
+    nothing and changes nothing: it reads the lease file under its lock. A lease file it cannot read counts as shut, and is named."""
+    started, told = clock(), None
+    while True:
+        left = None if timeout is None else timeout - (clock() - started)
+        try:
+            with Store(folder, wait=60 if left is None else max(1, min(60, left)), save=False) as state:
+                why = claims(state, clock(), session)
+        except Exception as error:
+            why = [f'the lease file could not be read ({type(error).__name__}: {error})']
+        waited = clock() - started
+        if not why:
+            if told is not None:
+                say(f'machine gate ({purpose}): free after {waited:.0f} s')
+            return waited
+        if timeout is not None and waited >= timeout:
+            raise GateTimeout(f'machine gate ({purpose}): still shut after {waited:.0f} s: ' + '; '.join(why), why)
+        if told is None or clock() - told >= report_every:
+            say(f'machine gate ({purpose}): waiting: ' + '; '.join(why))
+            told = clock()
+        sleep(poll if timeout is None else max(0.0, min(poll, timeout - waited)))

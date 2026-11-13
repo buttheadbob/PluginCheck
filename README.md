@@ -264,6 +264,27 @@ Each call prints the session's leases as JSON. Keep calling `request` or `heartb
 container with `docker run --cpuset-cpus <cores> --name <container> ...`. The rules are in `stages/leases.py`, tested without
 Docker by `python -m unittest discover -s tests`.
 
+### Machine gate
+A measurement that needs a quiet machine claims it at once with an exclusive request, and waits only for work already running. Work
+that holds no lease, such as a session's build, test suite or live run, calls the gate first, so none starts while a claim waits or
+holds:
+
+```
+python -I lease.py gate --purpose "Inertia build" [--timeout 600] [--session NAME]
+```
+
+- It waits while an exclusive request waits or holds, then exits 0 and prints `{"gate": "free", ...}`.
+- With `--timeout` it exits 3 once that many seconds have passed with the gate still shut (`0` looks once). The message, on stderr,
+  names who claims the machine and since when, and what a waiting claim still waits for; stdout has `{"gate": "shut", "claims": [...]}`.
+- Without `--timeout` it waits as long as the claim lasts, with a line on stderr every 5 minutes. A tool with its own time limit passes
+  one.
+- `--session` leaves that session's own claim out, so a claim's holder can gate its own builds.
+- A claim that has lapsed (no heartbeat for 5 minutes) does not shut it. A lease file it can't read counts as shut, and is named.
+- It starts nothing, opens no window and changes nothing. It is a look before the work starts: work it let through runs to its end, and
+  the claim's holder waits for that itself, such as by watching the processes and CPU. Nothing is paused or suspended.
+- From Python: put this folder on `sys.path`, `import lease`, and call `lease.gate("Inertia build", timeout=600)`. It returns the seconds
+  it waited, or raises `lease.GateTimeout`, whose `claims` lists the same words.
+
 ## Pre-container lane
 A run can be split in two, so that everything before `behaviour` happens while another run's `behaviour` still has the machine:
 
