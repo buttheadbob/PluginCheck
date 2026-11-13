@@ -653,6 +653,15 @@ def differences(first, second):
     return out
 
 
+def replies_of(record):
+    """What a command said, without what always differs: Linux and Windows line endings, and timings and clock times."""
+    out = []
+    for reply in record.get('replies') or []:
+        reply = re.sub(r'\b\d+(\.\d+)?\s?ms\b', '<ms>', reply.replace('\r\n', '\n'))
+        out.append(re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '<time>', reply))
+    return out
+
+
 def touched(record):
     """Real changes to the world. Which grid of a docked pair is the parent can move on its own, so that does not count."""
     return {k: v for k, v in changes(record).items() if k[1] not in ('parent', 'connection')}
@@ -830,7 +839,7 @@ def compare(plan):
             continue
         found = [{'scenario': plan['name'], 'grid': grid, 'field': field, first.replace('-', '_'): left, second.replace('-', '_'): right,
                   'between': [first, second], 'unstable': (plan['name'], grid, field) in unstable} for (grid, field), (left, right) in disagreements(a, b).items()]
-        if a.get('replies') != b.get('replies'):
+        if replies_of(a) != replies_of(b):
             found.append({'scenario': plan['name'], 'grid': '', 'field': 'replies', first.replace('-', '_'): a.get('replies'), second.replace('-', '_'): b.get('replies'), 'between': [first, second], 'unstable': False})
         for d in found:
             left, right = d['between']
@@ -849,6 +858,8 @@ by_name = {p['name']: p for p in plans}
 after_stage = int(os.environ.get('PLUGINCHECK_SECONDS_AFTER', '0'))
 started = time.time()
 wrongly_classified = {}
+not_handled = {}
+UNHANDLED = 'the command was not handled'
 WRONG_ARGUMENTS = 'PluginCheck: Torch passed '
 wrong_arguments = {}
 
@@ -872,6 +883,10 @@ def take(build, repeat, results):
         name = record['scenario']
         note_arguments(record)
         records[build['name'], name, repeat] = record
+        # A build was only given a command it has, so this is a line the probe got wrong, and matching builds would otherwise hide it.
+        if UNHANDLED in (record.get('replies') or []) and name not in not_handled.setdefault(build['name'], []):
+            not_handled[build['name']].append(name)
+            print(f"FAILED  {build['name']}  {name} never ran: {UNHANDLED}", flush=True)
         if record.get('failed') or record.get('state') != 'recorded':
             failure = {'build': build['name'], 'scenario': name, 'reason': str(record.get('failed') or record.get('blocked') or record.get('state'))[:400]}
             failures.append(failure)
@@ -921,12 +936,20 @@ if suspect:
         compare(by_name[name])
 
 json.dump([dict(r) for r in records.values()], open(os.path.join(run_dir, 'behaviour-records.json'), 'w', encoding='utf-8'), indent=1)
+# What every command said, for reading. Nothing here can tell a command that did its work from one that stopped at its first check. A person or an AI can.
+said = {}
+for (name, scenario, _), record in sorted(records.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+    text = ' | '.join(replies_of(record))[:300].replace('\n', ' ')
+    said.setdefault(scenario, {}).setdefault(name, f"[{record['wrongArguments']}] {text}" if 'wrongArguments' in record else text)
+write(os.path.join(run_dir, 'behaviour-replies.txt'), ''.join(f'{scenario}\n' + ''.join(f'  {name}: {text}\n' for name, text in builds.items()) for scenario, builds in said.items()))
 
-print(f"{len(records)} results, {len(failures)} failed, {len(real)} differences, {sum(d['unstable'] for d in real)} of them unstable, "
-      f"{len(quiet)} of {len(plans)} scenarios changed nothing in the world")
+unhandled = sum(len(v) for v in not_handled.values())
+print(f"{len(records)} results, {len(failures)} failed, {unhandled} never ran, {len(real)} differences, "
+      f"{sum(d['unstable'] for d in real)} of them unstable, {len(quiet)} of {len(plans)} scenarios changed nothing in the world")
+print('Results say a server finished. To know how far each command got, read behaviour-replies.txt.')
 print('Each difference is a lead: it says two builds disagree, not which is right. No differences would say only that these scenarios agreed.')
 crashed = any('stack' in f['reason'].lower() for f in failures)
-finish('fail' if crashed else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
+finish('fail' if crashed or unhandled else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
        servers=len(jobs), reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
-       noChange=quiet, wrongArguments=wrong_arguments, skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
+       noChange=quiet, wrongArguments=wrong_arguments, notHandled=not_handled, skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
        note='A difference is a lead. No differences proves nothing beyond these scenarios.')

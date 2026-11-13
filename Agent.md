@@ -46,6 +46,19 @@ weather can share. Use `"writes": ["*"]` only for a command that could reach any
 
 A command that changes something it does not declare fails loudly, and reruns alone. Source changes need a fresh reading.
 
+## Check that commands really ran
+
+Results say a server finished, and two builds that fail the same way agree. Neither says a command did its work. Before you report any `behaviour` result:
+
+1. Read `behaviour-replies.txt` from start to finish, for every host. A reply such as "not found", "usage" or "in-game only" means the command stopped at
+   its first check, so it was not tested, whatever the stage's status says.
+2. Say in your report how many commands reached their logic on each host, and name the ones that did not. Never report a count of servers or
+   results as if it were coverage.
+3. Treat `FAILED ... never ran` as a defect in PluginCheck or the example. Find the cause before you give it a verdict. Never explain it away.
+4. Claim only what ran. A host that only loaded the plugin proved that it loads, and a line that was never run is read code, not tested code.
+5. Treat `TORCH-ARGS` as a command that did not get what was typed. Torch finds a command's arguments by searching the whole line for the first one, so
+   `on` in `!monitor everything on` is found in "monitor". Read that reply, and give it a real example if `commands` warned about a value no example used.
+
 ## Read before you report
 
 1. **Read the code behind every lead before you report it.** That is every `WARN`, `CHECK`, `LEAD`, `THREAD-SENSITIVE`, `DIFF`, `UNSTABLE`,

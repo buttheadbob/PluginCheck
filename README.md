@@ -172,7 +172,10 @@ rotors, wheels, landing gear and connectors, and a moon for gravity. Every build
 is marked `UNSTABLE`, with the builds it happened on, because it depends on timing. `PLUGINCHECK_REPEATS` sets how many runs each build gets.
 
 The probe records on the game thread, the only place the game gives the full answer. Results land in `behaviour.json`, with every
-record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+record in `behaviour-records.json`, and what every command said in `behaviour-replies.txt`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+
+A finished server only proves that a server finished. Two builds that fail the same way agree, so a command that never ran fails the stage,
+and how far each command got has to be read from `behaviour-replies.txt`.
 
 **What it cannot prove:**
 - **Correctness.** No difference only means the builds agree, and both may be wrong.
