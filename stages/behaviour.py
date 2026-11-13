@@ -858,9 +858,16 @@ fingerprints = {b['name']: build_hash(b) for b in builds}
 tools = tool_hash()
 games = {host: game_hash(host) for host in {b['host'] for b in builds}}
 discovered = {}
-for build in builds:
-    known_build = remembered(build, [{'mode': 'discover'}], 0)
-    discovered[build['name']] = (known_build or run_and_remember_discovery(build))[0]
+
+
+def discover(build):
+    return build['name'], (remembered(build, [{'mode': 'discover'}], 0) or run_and_remember_discovery(build))[0]
+
+
+# Side by side: one build that hangs, such as a published build stuck at start, no longer holds up the others.
+with concurrent.futures.ThreadPoolExecutor(max(1, min(workers, len(builds)))) as pool:
+    for name, record in pool.map(discover, builds):
+        discovered[name] = record
 blocked = [r['blocked'] for r in discovered.values() if r.get('blocked')]
 broken = {n: r.get('failed') or r.get('blocked') for n, r in discovered.items() if r.get('failed') or r.get('blocked')}
 for name, reason in broken.items():
