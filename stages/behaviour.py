@@ -493,6 +493,11 @@ def serve(build, batch, save, probe_zip, cores):
     docker('cp', f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))
     if magnetar:
         docker('cp', f'{container}:/data/Magnetar/.', os.path.join(folder, 'magnetar'))
+        # The game's own log, where PluginSdk writes a standalone plugin's lines, Debug ones too (MagnetarLogSink). Without the save.
+        game = os.path.join(folder, 'instance')
+        docker('cp', f'{container}:{instance}/.', game)
+        shutil.rmtree(os.path.join(game, 'Saves'), ignore_errors=True)
+        shutil.rmtree(os.path.join(game, 'Backup'), ignore_errors=True)
     else:
         docker('cp', f'{container}:/run-data/Logs/.', os.path.join(folder, 'logs'))
     docker('rm', '-f', '-v', container)
