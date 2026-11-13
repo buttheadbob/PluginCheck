@@ -31,6 +31,9 @@ A `behaviour` run can take hundreds of servers, so make sure it will work before
    says which), the fixture or the probes. Make those changes before a run, not between runs,
    and only when the user agrees.
 6. Changing a plugin's source also needs a new command classification. Otherwise every command gets its own server and every setting is flipped.
+7. While another run's `behaviour` has the machine, the first half of a run can go ahead in the pre-container lane:
+   `python check.py <target> --pre`, then `python check.py <target> --continue <run folder>` once the machine is free (README,
+   Pre-container lane). Both halves go in a terminal the user can see, like any run.
 
 ## Classify commands before a run
 

@@ -11,10 +11,14 @@ session's container.
 An exclusive request, for measurements that need a quiet machine, drains everything: no new grants, no new PluginCheck
 servers, and it is granted once nothing else runs.
 
+PluginCheck's own pre-container lane (check.py --pre) takes one slot as the session LANE. It counts against neither borrower limit,
+so with 3 sessions borrowing 2 slots each a run keeps 16 - 6 - 1 = 9. It is granted like any lease, gives its slot back when it
+ends, and steps aside for an exclusive request (Lane).
+
 Everything lives in one JSON file, changed under a lock, so any session can use it from the command line (lease.py) and
 PluginCheck from Python. The decisions are plain functions of the state and the time, so they are tested without Docker.
 """
-import json, os, re, threading, time, uuid
+import contextlib, json, os, re, threading, time, uuid
 
 # Shared by every session on the machine. PLUGINCHECK_MACHINE_DIR moves it, such as to a folder outside this checkout.
 FOLDER = os.environ.get('PLUGINCHECK_MACHINE_DIR') or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'machine')
@@ -24,7 +28,11 @@ HEARTBEAT_LIMIT = 300
 OWNER_LIMIT = 120
 LOCK_STALE = 120
 LOCK_REMOVE_SECONDS = 5
+# How long the lane's last give-back is tried when it ends, before its lease is left to expire.
+RELEASE_SECONDS = 10
 SESSION = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
+# PluginCheck's pre-container lane: at most one slot, outside MAX_SESSIONS and MAX_PER_SESSION. lease.py refuses the name.
+LANE = 'plugincheck-pre'
 
 
 def docker_names():
@@ -67,7 +75,9 @@ def wants(state, request):
     if request.get('exclusive'):
         return 0
     have = len(held(state, request['session']))
-    if have == 0 and len({l['session'] for l in state['leases'] if not l.get('exclusive')}) >= MAX_SESSIONS:
+    if request['session'] == LANE:
+        return max(0, 1 - have)
+    if have == 0 and len({l['session'] for l in state['leases'] if not l.get('exclusive') and l['session'] != LANE}) >= MAX_SESSIONS:
         return 0
     return max(0, min(request['count'], MAX_PER_SESSION) - have)
 
@@ -409,8 +419,11 @@ class Lending:
     stop() is final: a beat after it, or one still running when it is called, cannot mark the owner as running again."""
 
     def __init__(self, make_owner, say=print):
+        """With make_owner None, lending is off on purpose, such as in the pre-container lane, which must never act as the owner."""
         self.say, self.seen, self.owner, self.lent_at_start = say, set(), None, set()
         self.stopped, self.ending = False, threading.Lock()
+        if make_owner is None:
+            return
         try:
             owner = make_owner()
             self.lent_at_start = owner.start()
@@ -462,3 +475,141 @@ class Lending:
                 self.owner.stop()
             except Exception as error:
                 self.note('stop', error)
+
+
+def machine_cores():
+    """The slots the behaviour stage makes: 2 logical cores each, from the cores Docker can use."""
+    count = int(os.environ.get('PLUGINCHECK_LEASE_CORES', os.cpu_count() or 2))
+    return [f'{first}-{first + 1}' for first in range(0, count - 1, 2)]
+
+
+class Lane:
+    """PluginCheck's pre-container lane (check.py --pre): one slot of its own, held as the session LANE.
+
+    acquire() waits for the slot: granted at once with no behaviour run going, else when one of the run's servers finishes. stage()
+    runs one stage at a time on it, since one slot has 2 cores. A thread keeps the heartbeat, and when an exclusive request appears
+    it lets the stage going finish, gives the slot back and waits for the machine again before the next stage. release() gives the
+    slot back for good, which ends the lane."""
+
+    def __init__(self, all_cores, folder=FOLDER, names=docker_names, clock=time.time, poll=5, beat_every=30, say=print):
+        self.all_cores, self.folder, self.names, self.clock = list(all_cores), folder, names, clock
+        self.poll, self.beat_every, self.say = poll, beat_every, say
+        self.cores, self.active, self.draining = None, 0, False
+        self.changed, self.stopped, self.thread = threading.Condition(), threading.Event(), None
+
+    def ask(self):
+        """Asks for the slot once. Returns its cores once granted, else None."""
+        try:
+            running_now = running_check(self.names())
+        except Exception:
+            running_now = running_check(None)
+        with Store(self.folder) as state:
+            now = self.clock()
+            expire(state, now, running_now)
+            request(state, LANE, 1, now, purpose='PluginCheck pre-container lane')
+            grant_when_idle(state, now, self.all_cores)
+            mine = held(state, LANE)
+            return mine[0]['cores'] if mine else None
+
+    def wait_for_slot(self):
+        """Asks until the slot is granted. A lease file that can't be read or locked for a moment is asked again, so the thread that
+        brings the lane back after an exclusive request never dies."""
+        while not self.stopped.is_set():
+            try:
+                cores = self.ask()
+            except Exception as error:
+                self.say(f'lane: asking for the slot failed ({type(error).__name__}: {error}), trying again')
+                cores = None
+            if cores:
+                return cores
+            self.stopped.wait(self.poll)
+        return None
+
+    def acquire(self):
+        cores = self.wait_for_slot()
+        with self.changed:
+            self.cores = cores
+            self.changed.notify_all()
+        if self.thread is None:
+            self.thread = threading.Thread(target=self.keep, daemon=True)
+            self.thread.start()
+        return cores
+
+    def beat(self):
+        """The heartbeat. True when an exclusive request waits or holds the machine."""
+        with Store(self.folder) as state:
+            heartbeat(state, LANE, self.clock())
+            return exclusive_wanted(state)
+
+    def keep(self):
+        """The heartbeat thread. Nothing may end it: without it the heartbeat stops, and a stage waiting for the lane to come back waits
+        for ever."""
+        while not self.stopped.wait(self.beat_every):
+            try:
+                self.keep_once()
+            except Exception as error:
+                self.say(f'lane: keeping the slot failed ({type(error).__name__}: {error}), trying again')
+
+    def keep_once(self):
+        try:
+            if not self.beat():
+                return
+        except Exception as error:
+            self.say(f'lane: heartbeat failed ({type(error).__name__}: {error}), trying again')
+            return
+        with self.changed:
+            self.draining = True
+            while self.active and not self.stopped.is_set():
+                self.changed.wait()
+        if self.stopped.is_set():
+            return
+        self.say('lane: an exclusive request is waiting, so the slot goes back until it is done')
+        if not self.give_back_until_done():
+            return
+        cores = self.wait_for_slot()
+        with self.changed:
+            self.cores, self.draining = cores, False
+            self.changed.notify_all()
+
+    @contextlib.contextmanager
+    def stage(self):
+        """Holds the slot for one stage, and gives its cores. Waits while another stage runs, or while the lane steps aside."""
+        with self.changed:
+            while (self.draining or self.active or not self.cores) and not self.stopped.is_set():
+                self.changed.wait()
+            self.active += 1
+            cores = self.cores
+        try:
+            yield cores
+        finally:
+            with self.changed:
+                self.active -= 1
+                self.changed.notify_all()
+
+    def give_back(self):
+        with Store(self.folder) as state:
+            release(state, LANE)
+        with self.changed:
+            self.cores = None
+
+    def give_back_until_done(self, seconds=None):
+        """give_back, tried again with a growing pause while the lease file can't be written: on Windows a write is refused while another
+        program has the file open. Without a limit it gives up only when the lane is released, which gives the slot back itself."""
+        pause, deadline = 0.1, None if seconds is None else time.time() + seconds
+        while True:
+            try:
+                self.give_back()
+                return True
+            except Exception as error:
+                self.say(f'lane: giving the slot back failed ({type(error).__name__}: {error}), trying again')
+            if (deadline is None and self.stopped.is_set()) or (deadline is not None and time.time() >= deadline):
+                return False
+            time.sleep(pause)
+            pause = min(pause * 2, self.poll)
+
+    def release(self):
+        self.stopped.set()
+        with self.changed:
+            self.changed.notify_all()
+        if not self.give_back_until_done(seconds=RELEASE_SECONDS):
+            self.say(f'lane: the slot could not be given back, so its lease ends by itself {HEARTBEAT_LIMIT // 60} minutes after the last heartbeat')

@@ -22,9 +22,8 @@ import leases
 
 
 def cores_of_machine():
-    # The same slots the behaviour stage makes: 2 logical cores each, from the cores Docker can use.
-    count = int(os.environ.get('PLUGINCHECK_LEASE_CORES', os.cpu_count() or 2))
-    return [f'{first}-{first + 1}' for first in range(0, count - 1, 2)]
+    # The same slots the behaviour stage makes.
+    return leases.machine_cores()
 
 
 def show(state, session=None):
@@ -46,6 +45,8 @@ def main():
     args = parser.parse_args()
     if args.action != 'status' and not (args.session and leases.SESSION.match(args.session)):
         parser.error('--session is required: 1 to 64 letters, digits, "_", "." or "-", starting with a letter or digit')
+    if args.session == leases.LANE:
+        parser.error(f"{leases.LANE} is PluginCheck's own pre-container lane, which check.py --pre runs")
     running_now = leases.running_check(leases.docker_names())  # read before the lock: nothing slow runs under it
     with leases.Store() as state:
         now = time.time()
