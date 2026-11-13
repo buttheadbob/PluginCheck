@@ -51,6 +51,7 @@ PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b10'
 TORCH_PROBE_ID = '6f0c1f3e-52a4-4b7e-9e1d-3c9a7d2e4b11'
 START_TIMEOUT = 20 * 60
 CHECK_SECONDS = 5
+STALL_SECONDS = 10 * 60
 IDLE_SECONDS = 120
 # All a plugin can tell about being on a cluster: PluginSdk's PluginCluster.IsClusterProcess reads the first, and PluginStorage the second. One process
 # with these is a cluster node to a plugin, with no gateway or other nodes, and a line that writes the shared folder stands in for another node.
@@ -477,6 +478,13 @@ def container_log(container):
     return said.stdout + said.stderr
 
 
+def stall_limit(batch):
+    """Seconds with no new log line before a server counts as stalled: STALL_SECONDS, or for a scenario that itself waits longer in one go
+    (its settle, or one step's minimum), that long and a minute more."""
+    settle = batch[0].get('settle') or options.get('settleSeconds') or 15
+    return max(STALL_SECONDS, max([settle] + [p.get('min', 10) for p in batch]) + 60)
+
+
 def serve(build, batch, save, probe_zip, cores, timing, free):
     """One disposable server for the scenarios that share it. Returns what the probe recorded for each, or why it could not.
     Notes the host clock in timing as it goes (behaviour/timing.py), and calls free() to give its cores back once it is killed."""
@@ -508,8 +516,16 @@ def serve(build, batch, save, probe_zip, cores, timing, free):
 
     # Asking Docker once a second for every server was up to 48 docker commands a second on a full run. Docker is asked every CHECK_SECONDS
     # instead, for a record the copy missed, a Torch fatal error, or a server that ended.
-    check = f'test -f {instance}/probe.json && echo recorded' + ('' if magnetar else ' || (grep -qF "[FATAL]" /run-data/Logs/Torch-*.log && echo fatal)')
-    start, state, asked = time.time(), 'timeout', 0
+    # The same call says how much the server has logged, and its newest line, for the stall check below.
+    logs = '/data/Magnetar /data/Instance' if magnetar else '/run-data/Logs /run-data/Instance'
+    check = (f'if test -f {instance}/probe.json; then echo recorded; '
+             + ('' if magnetar else 'elif grep -qF "[FATAL]" /run-data/Logs/Torch-*.log 2>/dev/null; then echo fatal; ')
+             + f'else echo waiting; fi; logs=$(find {logs} -name "*.log" 2>/dev/null); '
+             'if [ -n "$logs" ]; then wc -c $logs | tail -n 1; tail -n 1 $(ls -t $logs | head -n 1); fi; true')
+    # A server that logs nothing for stall_limit() seconds, has no record and is not compiling has stopped: it ends as a timeout, and the run
+    # goes on.
+    limit = stall_limit(batch)
+    start, state, asked, logged, logged_at, stalled = time.time(), 'timeout', 0, None, time.time(), None
     while time.time() - start < START_TIMEOUT:
         if os.path.exists(marker):
             state = 'recorded'
@@ -518,12 +534,22 @@ def serve(build, batch, save, probe_zip, cores, timing, free):
             asked = time.time()
             # Torch logs a fatal error and then hangs instead of exiting.
             said = docker('exec', container, 'sh', '-c', check)
-            if said.stdout.strip() in ('recorded', 'fatal'):
-                state = said.stdout.strip()
+            lines = said.stdout.splitlines()
+            if lines and lines[0].strip() in ('recorded', 'fatal'):
+                state = lines[0].strip()
                 break
             if said.returncode and docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
                 state = 'exited'
                 break
+            if not said.returncode:
+                size, newest = (lines[1] if len(lines) > 1 else ''), (lines[2] if len(lines) > 2 else '')
+                if size != logged:
+                    logged, logged_at = size, time.time()
+                # Only once it has logged: a server still starting, with nothing in its log folders yet, is left to START_TIMEOUT.
+                elif logged and time.time() - logged_at >= limit and 'compil' not in newest.lower():
+                    stalled = int(time.time() - logged_at)
+                    print(f"  {timing['server']} wrote no log line for {stalled}s and has no record, so it ends as a timeout", flush=True)
+                    break
         time.sleep(0.5)
     seconds = int(time.time() - start)
     timing['stopped'], timing['state'] = time.time(), state
@@ -573,7 +599,8 @@ def serve(build, batch, save, probe_zip, cores, timing, free):
         except ValueError as e:
             record['failed'] = f'the probe wrote something unreadable: {e}'
     elif not blocked:
-        record['failed'] = f'the server {state} after {seconds}s with no record. Last lines: {startlog.last_lines(text)[:400]}'
+        quiet = f', and wrote no log line for its last {stalled}s' if stalled else ''
+        record['failed'] = f'the server {state} after {seconds}s with no record{quiet}. Last lines: {startlog.last_lines(text)[:400]}'
     shutil.rmtree(os.path.join(folder, 'magnetar', 'Instance'), ignore_errors=True)
     steps = record.pop('steps', None)
     if steps is None:

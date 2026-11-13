@@ -1,5 +1,5 @@
 """The slot goes back at kill, and the wait asks Docker less. Run with: python -I -m unittest discover -s tests"""
-import ast, itertools, json, os, re, shutil, sys, tempfile, threading, time, types, unittest
+import ast, itertools, json, os, re, shutil, sys, threading, time, types, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -30,6 +30,62 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(r.result()['status'], 'review')
 
 
+class LiftedServe(unittest.TestCase):
+    """serve() lifted out of behaviour.py, with Docker and the server start replaced."""
+
+    def serve(self, host, answers, marker_after=None, stall=600, start_timeout=20, kill_fails=False):
+        """answers: what each Docker check prints, in turn, or a function giving it."""
+        tree = ast.parse(open(SOURCE, encoding='utf-8').read())
+        wanted = {'serve', 'write', 'read_text', 'container_log'}
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+        work = replay.folder()
+        calls, ended, written = [], [], []
+
+        def docker(*args):
+            calls.append(args)
+            out = types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            if args[0] == 'exec':
+                said = answers() if callable(answers) else answers.pop(0) if answers else ''
+                if said == 'ENDED':
+                    ended.append(True)
+                    said = ''
+                out.stdout, out.returncode = said, 0 if said else 1
+                if said.startswith(('recorded', 'fatal')) or said == 'ENDED':
+                    written.append(said == 'recorded')
+            elif args[0] == 'inspect':
+                out.stdout = 'false' if ended else 'true'
+            elif args[0] == 'kill' and kill_fails:
+                out.returncode = 1
+            elif args[0] == 'cp' and args[1].endswith('/probe.json') and any(written):
+                with open(args[2], 'w', encoding='utf-8') as f:
+                    json.dump({'after': {'grids': {}}}, f)
+            return out
+
+        def start(*args):
+            folder = args[2] if host != 'legacy' else args[1]
+            if marker_after is not None:
+                def later():
+                    time.sleep(marker_after)
+                    with open(os.path.join(folder, 'marker', 'probe.json'), 'w', encoding='utf-8') as f:
+                        f.write('{}')
+                    written.append(True)
+                threading.Thread(target=later, daemon=True).start()
+
+        namespace = {'os': os, 'shutil': shutil, 'json': json, 're': re, 'glob': __import__('glob'), 'time': time, 'docker': docker,
+                     'counter': itertools.count(1), 'work': work, 'scenario_file': lambda build, batch: 'mode=run\n', 'START_TIMEOUT': start_timeout, 'stall_limit': lambda batch: stall, 'options': {},
+                     'CHECK_SECONDS': 1, 'startlog': startlog, 'remember_magnetar_cache': lambda folder: None,
+                     'seed_magnetar': lambda *a: None, 'seed_torch': lambda *a: None, 'start_magnetar': start, 'start_legacy': start,
+                     'start_torch': start}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), namespace)
+        save = os.path.join(work, 'save')
+        os.makedirs(save)
+        freed = []
+        timing = {}
+        build = {'name': f'working-{host}', 'host': host, 'plugin': 'Demo'}
+        records = namespace['serve'](build, [{'name': 's', 'command': '!demo'}], save, None, '0-1', timing, lambda: freed.append(len(calls)))
+        return records, calls, freed, timing
+
+
 class RunningTests(unittest.TestCase):
     """run_server lifted: a server counts as running through its clean-up, so an exclusive lease waits for it."""
 
@@ -56,57 +112,7 @@ class RunningTests(unittest.TestCase):
         self.assertEqual(running[0], 0)
 
 
-class WaitTests(unittest.TestCase):
-    """serve() lifted out of behaviour.py, with Docker and the server start replaced."""
-
-    def serve(self, host, answers, marker_after=None, kill_fails=False):
-        tree = ast.parse(open(SOURCE, encoding='utf-8').read())
-        wanted = {'serve', 'write', 'read_text', 'container_log'}
-        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
-        work = tempfile.mkdtemp(prefix='pc-wait-')
-        calls, ended = [], []
-
-        def docker(*args):
-            calls.append(args)
-            out = types.SimpleNamespace(returncode=0, stdout='', stderr='')
-            if args[0] == 'exec':
-                said = answers.pop(0) if answers else ''
-                if said == 'ENDED':
-                    ended.append(True)
-                    said = ''
-                out.stdout, out.returncode = said, 0 if said else 1
-            elif args[0] == 'inspect':
-                out.stdout = 'false' if ended else 'true'
-            elif args[0] == 'kill' and kill_fails:
-                out.returncode = 1
-            elif args[0] == 'cp' and args[1].endswith('/probe.json'):
-                with open(args[2], 'w', encoding='utf-8') as f:
-                    json.dump({'after': {'grids': {}}}, f)
-            return out
-
-        def start(*args):
-            folder = args[2] if host != 'legacy' else args[1]
-            if marker_after is not None:
-                def later():
-                    time.sleep(marker_after)
-                    with open(os.path.join(folder, 'marker', 'probe.json'), 'w', encoding='utf-8') as f:
-                        f.write('{}')
-                threading.Thread(target=later, daemon=True).start()
-
-        namespace = {'os': os, 'shutil': shutil, 'json': json, 're': re, 'glob': __import__('glob'), 'time': time, 'docker': docker,
-                     'counter': itertools.count(1), 'work': work, 'scenario_file': lambda build, batch: 'mode=run\n', 'START_TIMEOUT': 20,
-                     'CHECK_SECONDS': 1, 'startlog': startlog, 'remember_magnetar_cache': lambda folder: None,
-                     'seed_magnetar': lambda *a: None, 'seed_torch': lambda *a: None, 'start_magnetar': start, 'start_legacy': start,
-                     'start_torch': start}
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), namespace)
-        save = os.path.join(work, 'save')
-        os.makedirs(save)
-        freed = []
-        timing = {}
-        build = {'name': f'working-{host}', 'host': host, 'plugin': 'Demo'}
-        records = namespace['serve'](build, [{'name': 's', 'command': '!demo'}], save, None, '0-1', timing, lambda: freed.append(len(calls)))
-        return records, calls, freed, timing
-
+class WaitTests(LiftedServe):
     def test_the_marker_is_seen_without_asking_docker_again(self):
         records, calls, freed, timing = self.serve('magnetar', [], marker_after=0.3)
         self.assertEqual(records[0]['state'], 'recorded')

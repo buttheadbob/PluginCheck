@@ -130,6 +130,8 @@ again, and test the fix. When you are only reviewing a plugin, tell the user wha
 - You never run git yourself. PluginCheck can use git to download repositories into its cache, and a skill's own setup and scripts can use the git
   and `gh` they need. Anything that changes the user's repositories or posts for them still needs the user to ask, each time.
 - PluginCheck is fully automated. Never make a stage depend on a person writing or checking a per-plugin file.
-- Never cap a run. There is always enough time for PluginCheck to run properly.
+- Never cap a run. There is always enough time for PluginCheck to run properly. The one exception:
+  `behaviour` ends a single server that has written no log line for 10 minutes, has no record and is not compiling, and reports it as
+  `FAILED … timeout` with its last lines. Retries stay as they are, and the run itself is never ended.
 - A reused result is still a result. Judge it like any other, and say in your report what was reused.
 - Comparisons are not tied to a platform. Never require both sides to be on the same one.
