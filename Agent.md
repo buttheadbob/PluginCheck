@@ -38,6 +38,8 @@ A `behaviour` run can take hundreds of servers, so make sure it will work before
 ## Classify commands before a run
 
 What a command touches is a judgement about its code, so it is yours to make. `behaviour` uses it to decide what shares a server.
+Make the reading, and give every lead from the stages before `behaviour` its verdict, before the run reaches `behaviour`: the
+reading decides which commands share a server, and a `--pre` half with no current reading ends `failed` (README, Pre-container lane).
 
 1. Run `python check.py <target> --only commands`. It prints a `CLASSIFY` line for each command when no current reading exists.
 2. Read every handler, and everything it calls.
