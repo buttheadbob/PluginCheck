@@ -116,10 +116,12 @@ def grant(state, request, cores, now):
 
 def expire(state, now, container_running=lambda name: False, alive=None):
     """Leases with no heartbeat for HEARTBEAT_LIMIT end. Their slots come back, unless the borrowed container still runs: then
-    the slot stays out of use as an orphan until it stops. Runs that stopped beating, or whose process is gone, end too.
-    Returns the cores that came back."""
+    the slot stays out of use as an orphan until it stops. Runs that stopped beating, or whose process is gone, end too, and so
+    does an owner that stopped beating, such as a behaviour stage that ended with no clean-up. Returns the cores that came back."""
     back = []
     alive = alive or process_alive
+    if state.get('owner') and state['owner'].get('running') and not owner_active(state, now):
+        state['owner']['running'] = False
     state['runs'] = [r for r in state.get('runs', []) if now - r.get('heartbeat', 0) <= OWNER_LIMIT and alive(r.get('pid'))]
     for lease in list(state['leases']):
         if now - lease['heartbeat'] > HEARTBEAT_LIMIT:

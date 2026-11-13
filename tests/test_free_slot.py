@@ -105,7 +105,7 @@ class RunningTests(unittest.TestCase):
         running = [0]
         lending = types.SimpleNamespace(may_start=lambda: True, free=lambda cores: None, note=lambda *a: None)
         namespace = {'time': time, 'lending': lending, 'slots': slots, 'running': running, 'running_lock': threading.Lock(), 'status': lambda **f: None,
-                     'serve': serve, 'server_timing': types.SimpleNamespace(summary=lambda t, p: (None, {}))}
+                     'serve': serve, 'server_timing': types.SimpleNamespace(summary=lambda t, p: (None, {})), 'ending': threading.Event()}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), namespace)
         namespace['run_server']({'name': 'b'}, [{'name': 's'}], None, None)
         self.assertEqual(seen, {'after free': 1, 'slot back': 1})
