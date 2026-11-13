@@ -845,6 +845,9 @@ if not any(b['published'] for b in builds):
 probe_zip = None
 if any(b['host'] == 'torch' for b in builds):
     probe_zip, problem = build_torch_probe()
+    # Magnetar compiles the same probe source itself, so a compile error here would also leave every Magnetar server waiting out its time limit.
+    if problem and 'error CS' in problem:
+        finish('not run', reason=problem)
     if problem:
         print(problem)
         builds = [b for b in builds if b['host'] != 'torch']
