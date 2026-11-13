@@ -456,6 +456,8 @@ def serve(build, batch, save, probe_zip, cores):
         shutil.rmtree(os.path.join(folder, 'magnetar', 'DevFolder'), ignore_errors=True)
         shutil.rmtree(os.path.join(folder, 'magnetar', 'GitHub'), ignore_errors=True)
     text = log + read_text(os.path.join(folder, 'container.log')) + ''.join(read_text(p) for p in glob.glob(os.path.join(folder, 'logs', '*.log')))
+    if state != 'recorded':
+        blocked = blocked or startlog.steam_stopped(text)
     mark = build['plugin'].lower()
     lines = sorted({re.sub(r'^\S+ \S+\s*', '', l).strip()[:200] for l in text.splitlines() if mark in l.lower() and re.search(r'convert|error|exception|fail|warn', l, re.I)})
     record = {'build': build['name'], 'state': state, 'seconds': seconds, 'blocked': blocked, 'log': lines[:40]}
@@ -546,7 +548,7 @@ def run_and_remember_discovery(build):
 
 
 def run_with_retry(build, batch, save, probe_zip):
-    """Magnetar not starting says nothing about the plugin. A rate limit can be waited out, and a dropped download tried again."""
+    """A server that never reached the plugin says nothing about it. A rate limit can be waited out, and a dropped download tried again."""
     attempts = 0
     while True:
         records_here = run_server(build, batch, save, probe_zip)
@@ -561,7 +563,7 @@ def run_with_retry(build, batch, save, probe_zip):
         attempts += 1
         if attempts >= 3:
             return records_here
-        print(f"  Magnetar did not start for {build['name']}, trying again: {record['blocked'][:160]}", flush=True)
+        print(f"  {build['name']} did not start, trying again: {record['blocked'][:160]}", flush=True)
         time.sleep(20)
 
 
