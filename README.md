@@ -55,6 +55,8 @@ A target can give the `behaviour` stage a `behaviour` section, all of it optiona
 | `programmableBlocks` | Adds the blocks in `stages/behaviour/programmable.py` to the world: each on a static grid out in space with a battery, with scripts that run light, run slow, hold memory, fault, or turn themselves on, for players, NPCs and no one, inside and outside safe zones |
 | `settleSeconds` | How long to wait once the world is ready, 15 by default. For a plugin with a warm-up, which would otherwise refuse every command |
 | `removeDuring` | `commands` to run again while things leave the world, each alone on its server. `minSeconds` is the least each runs for. `remove` lists `after`, `kind` and `name`, where `kind` is `grid`, `block`, `identity`, `faction` or `player`. The player is a `MyPlayer` the probe adds under the server's own client, so this is a player leaving the session, not a real client disconnecting |
+| `plugins` | Other plugins a variant can load beside this one, each built from source at a pinned commit or tag. `stages/behaviour/extraplugins.py` has the format |
+| `variants` | More builds made from each working build: with `plugins` loaded and their `config`, with `files` written before start, or with an `overlay` folder laid over the source, each limited to its `scenarios` |
 
 Add `--hold` to leave the Quasar-managed server running at http://127.0.0.1:18080 with no time limit, to look around its
 UI. A local request counts as trusted, so no Steam sign-in is needed. The port is only open to this machine. The run

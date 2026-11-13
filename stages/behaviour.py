@@ -34,7 +34,7 @@ from xml.sax.saxutils import escape
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, fixture, githubtoken, leases, startlog
+import classification, extraplugins, fixture, githubtoken, leases, startlog
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -165,7 +165,7 @@ def build_torch_probe():
     with zipfile.ZipFile(probe_zip, 'w') as z:
         z.write(dll, PROBE + '.dll')
         z.write(os.path.join(here, 'behaviour', 'torchprobe', 'manifest.xml'), 'manifest.xml')
-    shutil.rmtree(libs, ignore_errors=True)
+    # Kept until the other plugins a variant loads are built against them too.
     return probe_zip, None
 
 
@@ -316,6 +316,14 @@ def seed_magnetar(build, seed, folder):
     if magnetar_cache and not legacy:
         shutil.copytree(magnetar_cache, os.path.join(seed, 'Magnetar'), dirs_exist_ok=True)
     plugins = [(build['id'], name, build['manifest']), (PROBE_ID, PROBE, PROBE + '.xml')]
+    # Other plugins a variant loads beside this one, each with its config written before the server starts.
+    for label in build.get('with', []):
+        source_folder, extra_manifest, extra_id, _ = extra[label, 'magnetar']
+        shutil.copytree(source_folder, os.path.join(folder, 'source', label), ignore=shutil.ignore_patterns('.claude', '.git', 'bin', 'obj'))
+        plugins.append((extra_id, label, extra_manifest))
+        spec = options['plugins'][label]['magnetar']
+        if build.get('config', {}).get(label):
+            write(os.path.join(seed, 'Instance', spec['configFile']), extraplugins.config_xml(spec['configRoot'], build['config'][label]))
     dev = ''.join(f'    <LocalFolderConfig>\n      <Id>{escape(i)}</Id>\n      <DebugBuild>false</DebugBuild>\n    </LocalFolderConfig>\n' for i, _, _ in plugins)
     write(os.path.join(seed, 'Magnetar', 'Profiles', 'Current.xml'), f'''<?xml version="1.0"?>
 <Profile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
@@ -347,6 +355,9 @@ def seed_magnetar(build, seed, folder):
 </SourcesConfig>
 ''')
     write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('Z:\\data\\Instance\\Saves\\Fixture' if legacy else '/data/Instance/Saves/Fixture'))
+    # Files a variant writes before start, such as an older config of the plugin under test.
+    for relative, text in build.get('files', {}).items():
+        write(os.path.join(seed, relative), text)
 
 
 def start_magnetar(build, seed, folder, container, volume, cores, node=False):
@@ -371,6 +382,14 @@ def seed_torch(build, seed, folder, probe_zip):
     os.makedirs(plugins)
     shutil.copy(build['zip'], os.path.join(plugins, 'plugin.zip'))
     shutil.copy(probe_zip, plugins)
+    extra_guids = ''
+    for label in build.get('with', []):
+        extra_zip, extra_guid, extra_name = extra[label, 'torch']
+        shutil.copy(extra_zip, os.path.join(plugins, f'{extra_name}.zip'))
+        extra_guids += f'<guid>{escape(extra_guid)}</guid>'
+        spec = options['plugins'][label]['torch']
+        if build.get('config', {}).get(label):
+            write(os.path.join(seed, 'Instance', spec['configFile']), extraplugins.config_xml(spec['configRoot'], build['config'][label]))
     write(os.path.join(seed, 'Torch.cfg'), f'''<?xml version="1.0" encoding="utf-8"?>
 <TorchConfig xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <InstanceName>Instance</InstanceName>
@@ -383,10 +402,12 @@ def seed_torch(build, seed, folder, probe_zip):
   <GetPluginUpdates>false</GetPluginUpdates>
   <EnableAnalytics>false</EnableAnalytics>
   <LocalPlugins>true</LocalPlugins>
-  <Plugins><guid>{escape(build['id'])}</guid><guid>{TORCH_PROBE_ID}</guid></Plugins>
+  <Plugins><guid>{escape(build['id'])}</guid><guid>{TORCH_PROBE_ID}</guid>{extra_guids}</Plugins>
 </TorchConfig>
 ''')
     write(os.path.join(seed, 'Instance', 'SpaceEngineers-Dedicated.cfg'), dedicated_config('Z:\\run-data\\Instance\\Saves\\Fixture'))
+    for relative, text in build.get('files', {}).items():
+        write(os.path.join(seed, relative), text)
 
 
 def start_torch(build, seed, folder, container, volume, cores):
@@ -517,7 +538,7 @@ def remember_magnetar_cache(folder):
 def tool_hash():
     """Everything of ours that shapes a result."""
     digest = hashlib.sha256()
-    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py')):
+    for path in ('behaviour.py', os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py'), os.path.join('behaviour', 'extraplugins.py')):
         digest.update(open(os.path.join(here, path), 'rb').read())
     for folder in ('probe', 'torchprobe'):
         digest.update(classification.folder_hash(os.path.join(here, 'behaviour', folder)).encode())
@@ -530,6 +551,14 @@ def game_hash(host):
 
 
 def build_hash(build):
+    if build.get('variant'):
+        # A variant runs the same plugin with other plugins and config beside it, or with files laid over it.
+        specs = {label: options.get('plugins', {}).get(label) for label in build.get('with', [])}
+        return hashlib.sha256(json.dumps([base_hash(build), build.get('with'), build.get('config'), specs], sort_keys=True).encode()).hexdigest()[:16]
+    return base_hash(build)
+
+
+def base_hash(build):
     if build['published']:
         return build['version']
     if 'source' in build:
@@ -652,7 +681,11 @@ def generate(discovered, relevant, examples):
 
 
 def runs_on(build, plan):
-    """Whether a build runs a scenario: it has what the scenario needs, and only Magnetar on Linux is a cluster node."""
+    """Whether a build runs a scenario: it has what the scenario needs, a variant runs only its own, and only Magnetar on Linux is a cluster node."""
+    # A variant's scenarios: names containing a text, or exactly the name after '='.
+    if build.get('only') and plan.get('name') and not any(plan['name'].lower() == text[1:].lower() if text.startswith('=') else text.lower() in plan['name'].lower()
+                                                          for text in build['only']):
+        return False
     return fits(discovered[build['name']], plan) and (build['host'] == 'magnetar' or not plan.get('node'))
 
 
@@ -775,6 +808,17 @@ for source in (already, kept):
         shutil.copytree(source, os.path.join(magnetar_cache, 'GitHub'))
         break
 builds = working_builds() + published_builds()
+
+
+def overlay_copy(base, overlay, name):
+    """The working source with a variant's files laid over it, such as one file as it was at an older commit."""
+    copy = os.path.join(work, f'{name}-source')
+    shutil.copytree(base['source'], copy, dirs_exist_ok=True)
+    shutil.copytree(overlay, copy, dirs_exist_ok=True)
+    return copy
+
+
+builds += extraplugins.variant_builds(builds, options, work, overlay_copy)
 if not builds:
     finish('not run', reason='no build to run: no Magnetar manifest, no Torch zip, and nothing published')
 print('builds: ' + ', '.join(f"{b['name']}" + (f" ({b['version']} from {b['from']})" if b['published'] else '') for b in builds))
@@ -789,6 +833,25 @@ if any(b['host'] == 'torch' for b in builds):
         builds = [b for b in builds if b['host'] != 'torch']
         if not builds:
             finish('not run', reason=problem)
+
+# Other plugins the variants load, built from source once for the run.
+extra = {}
+for build in builds:
+    for label in build.get('with', []):
+        host = 'torch' if build['host'] == 'torch' else 'magnetar'
+        if (label, host) in extra:
+            continue
+        spec = options.get('plugins', {}).get(label, {}).get(host)
+        try:
+            if spec is None:
+                raise KeyError(f'behaviour.plugins has no {host} entry for it')
+            extra[label, host] = (extraplugins.torch_plugin(spec, cache, work, docker, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch']) if host == 'torch'
+                                  else extraplugins.magnetar_plugin(spec, cache))
+        except (KeyError, OSError, RuntimeError, ET.ParseError) as e:
+            finish('not run', reason=f"{build['name']} needs the plugin {label}, which could not be prepared: {e}")
+        print(f"{label} for {host}: {extra[label, host][-1] if host == 'magnetar' else extra[label, host][2]}, built from {spec['repo']} at {spec.get('commit') or spec.get('ref')}", flush=True)
+
+shutil.rmtree(os.path.join(work, 'torch-libs'), ignore_errors=True)
 
 print('discovering each build', flush=True)
 fingerprints = {b['name']: build_hash(b) for b in builds}
@@ -806,7 +869,7 @@ usable = [b for b in builds if b['name'] not in broken]
 if not usable:
     finish('unable to verify' if blocked else 'fail', reason=(blocked or list(broken.values()))[0][:500], discovered=discovered)
 # A working build left out can't be compared, so the servers a run would start are wasted. A published build left out only narrows the comparison.
-working_broken = [b['name'] for b in builds if not b['published'] and b['name'] in broken]
+working_broken = [b['name'] for b in builds if not b['published'] and not b.get('variant') and b['name'] in broken]
 if working_broken:
     finish('not run', reason=f"{', '.join(working_broken)} could not be discovered, so nothing was run: {str(broken[working_broken[0]])[:400]}",
            discovered=discovered, buildsLeftOut=broken)
