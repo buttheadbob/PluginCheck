@@ -12,8 +12,14 @@ each container pinned to its lease: docker run --cpuset-cpus <cores> --name <con
 <session>-<n>, never plugincheck-*. Call heartbeat at least every minute while working: a lease with none for 5 minutes ends.
 release when done. A session gets at most 2 slots, and at most 3 sessions borrow at once.
 
---exclusive asks for the whole machine, for measurements that need it quiet. PluginCheck starts no new server, nothing new is
-lent, and the lease (cores "all") is granted once nothing else runs. Release it when done.
+--exclusive asks for the whole machine, for measurements that need it quiet. PluginCheck starts no new server and no new Docker
+stage of a full run (each finishes the step it is on), nothing new is lent, and the lease (cores "all") is granted once nothing
+else runs: no server, no stage, no lease, and no running container the lease file does not know. Release it when done. Repeat the
+request about every 30 seconds until the reply shows the lease, and send a heartbeat every minute while holding it.
+
+Every reply carries exclusiveWaiting (an exclusive request waits: finish the container you are on, release, and ask again after
+it is done), exclusiveHeld, and, while one waits, waitingFor: what the drain still waits for. status adds unknownContainers: the
+running containers the lease file does not know, or null when Docker could not be asked.
 """
 import argparse, json, os, sys, time
 
@@ -26,11 +32,23 @@ def cores_of_machine():
     return leases.machine_cores()
 
 
-def show(state, session=None):
-    return {'leases': [l for l in state['leases'] if session is None or l['session'] == session],
-            'waiting': [r for r in state['requests'] if session is None or r['session'] == session],
-            'orphans': state['orphans'] if session is None else [o for o in state['orphans'] if o['session'] == session],
-            'pluginCheckRunning': leases.owner_active(state, time.time())}
+def show(state, session=None, containers=leases.NOT_CHECKED, now=None):
+    now = time.time() if now is None else now
+    waiting = any(r.get('exclusive') for r in state['requests'])
+    shown = {'leases': [l for l in state['leases'] if session is None or l['session'] == session],
+             'waiting': [r for r in state['requests'] if session is None or r['session'] == session],
+             'orphans': state['orphans'] if session is None else [o for o in state['orphans'] if o['session'] == session],
+             'pluginCheckRunning': leases.owner_active(state, now),
+             'exclusiveWaiting': waiting,
+             'exclusiveHeld': any(l.get('exclusive') for l in state['leases'])}
+    if waiting:
+        running = (state.get('owner') or {}).get('servers', 0) if leases.owner_active(state, now) else 0
+        shown['waitingFor'] = leases.exclusive_blockers(state, now, running, containers)
+    if session is None:
+        shown['stages'] = leases.run_stages(state, now)
+        if containers is not leases.NOT_CHECKED:
+            shown['unknownContainers'] = leases.unknown_containers(state, containers)
+    return shown
 
 
 def main():
@@ -47,7 +65,8 @@ def main():
         parser.error('--session is required: 1 to 64 letters, digits, "_", "." or "-", starting with a letter or digit')
     if args.session == leases.LANE:
         parser.error(f"{leases.LANE} is PluginCheck's own pre-container lane, which check.py --pre runs")
-    running_now = leases.running_check(leases.docker_names())  # read before the lock: nothing slow runs under it
+    names = leases.docker_names()  # read before the lock: nothing slow runs under it
+    running_now = leases.running_check(names)
     with leases.Store() as state:
         now = time.time()
         leases.expire(state, now, running_now)
@@ -57,8 +76,8 @@ def main():
             leases.heartbeat(state, args.session, now, args.log)
         elif args.action == 'release':
             leases.release(state, args.session, args.cores)
-        leases.grant_when_idle(state, now, cores_of_machine())
-        print(json.dumps(show(state, args.session if args.action != 'status' else None), indent=1))
+        leases.grant_when_idle(state, now, cores_of_machine(), names)
+        print(json.dumps(show(state, args.session if args.action != 'status' else None, names, now), indent=1))
 
 
 if __name__ == '__main__':

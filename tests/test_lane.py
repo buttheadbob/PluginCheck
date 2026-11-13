@@ -107,7 +107,7 @@ class ContinueTests(unittest.TestCase):
 
     def test_a_stage_is_timed_from_when_the_lane_lets_it_start(self):
         source = open(os.path.join(ROOT, 'check.py'), encoding='utf-8').read()
-        entered = source.index("with (lane.stage() if lane else contextlib.nullcontext()) as cores")
+        entered = source.index("(lane.stage() if lane else contextlib.nullcontext()) as cores")
         self.assertLess(entered, source.index('        start = time.time()', entered))
         self.assertNotIn('    start = time.time()\n    env = ', source)
 

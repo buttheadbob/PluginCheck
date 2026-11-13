@@ -231,8 +231,23 @@ such as mod or Torch fixes. They may not borrow them to check another plugin: th
 - The borrower pins its container to the lease's cores and names it `<session>-<n>`, never `plugincheck-*`.
 - A lease with no heartbeat for 5 minutes ends. If its container still runs, the slot stays out of use until it stops.
   PluginCheck never stops another session's container.
-- An exclusive request, for measurements that need a quiet machine, drains everything: no new lease and no new PluginCheck
-  server. It is granted, as cores `all`, once nothing else runs.
+- An exclusive request, for measurements that need a quiet machine, drains everything: no new lease, no new PluginCheck
+  server and no new Docker stage of a full run. Whatever is running finishes the step it is on: a server, or one stage. The lease is
+  granted, as cores `all`, once nothing else runs:
+  - no PluginCheck server, and no Docker stage of a full run (`check.py` registers for its whole life and every stage that starts a
+    container waits at its start while a request waits or holds, so each stage boundary is a hold point; `--pre`'s lane steps aside
+    as before);
+  - no lease and no orphaned slot;
+  - no running container the lease file does not know: a `--hold` Quasar, or a container a session started with no lease, holds the
+    grant until it stops. Docker's own build daemon (`buildx_buildkit_*`) is ignored; `PLUGINCHECK_IGNORE_CONTAINERS` adds prefixes.
+    If Docker can't be asked, the lease is not granted.
+  - The holder repeats the request about every 30 seconds until the reply shows the lease, then sends a heartbeat every minute.
+  - Inside the behaviour stage the unit is a server. Its short helper containers (a hash, a probe build) are not held back, but any that
+    is running when the grant is decided holds it.
+- **Borrowers:** every reply carries `exclusiveWaiting`. When it is true, finish the container you are on, release, and ask again once
+  it is done (the request waits for every lease to end, so a long-held lease keeps the machine from being quiet). `waitingFor` says what
+  the drain still waits for, `exclusiveHeld` says the machine is held, and `status` adds `stages` (the Docker stages of full runs in
+  progress) and `unknownContainers`.
 
 The leases are one file, `machine/leases.json` in this folder (`PLUGINCHECK_MACHINE_DIR` moves it), changed under a
 lock. Sessions use `lease.py`:

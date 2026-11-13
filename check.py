@@ -62,6 +62,9 @@ STOPPED_BY_LINT = (*SERVER_STAGES, 'regcheck', 'behaviour')
 ALONE = 'behaviour'
 # Reads every log the others wrote.
 LAST = 'logcheck'
+# The stages that never start a container. Every other stage waits at its start while an exclusive request waits or holds the machine
+# (leases.RunHold), and counts as running until it ends. tests/test_hold.py fails when a stage listed here mentions docker.
+NO_DOCKER = ('manifest', 'scan', 'policy', 'similar', 'copies', 'inherited', LAST)
 NEEDS_DIR = {'similar', 'copies', 'magnetar', 'legacy', 'regcheck', 'quasar', 'quasar_managed', 'torch', 'behaviour', 'inherited', 'reflection', 'dependencies', 'threads', 'commands', 'nulls', 'storage', 'hostpackages', 'lint', 'logcheck'}
 
 parser = argparse.ArgumentParser()
@@ -107,6 +110,13 @@ if args.pre:
     # Also on an early exit, so the slot never waits out the 5-minute lease limit.
     atexit.register(lane.release)
     print(f"the lane holds cores {os.environ['PLUGINCHECK_CPUSET']}", flush=True)
+# A full run (and the --continue half) registers for its whole life, and holds still at each stage boundary while an exclusive request
+# (a measurement that needs a quiet machine) waits or holds the machine. The lane's half is a lease of its own and steps aside itself.
+hold = None
+if not args.pre:
+    hold = leases.RunHold(target['name'], say=lambda text: print(text, flush=True))
+    hold.start()
+    atexit.register(hold.close)
 if args.hold:
     os.environ['PLUGINCHECK_HOLD'] = '1'
 if args.refresh:
@@ -164,8 +174,9 @@ begun, finished_stages = {}, set(results['stages'])
 
 def game_build():
     """A hash of the game's main assembly, or None before anything has installed it. On a first run the code stages have nothing to read."""
-    found = subprocess.run(['docker', 'run', *pin.args(), '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', 'mcr.microsoft.com/dotnet/sdk:10.0',
-                            '/ds/DedicatedServer64/Sandbox.Game.dll'], capture_output=True, text=True).stdout.split()
+    with hold.stage('game build') if hold else contextlib.nullcontext():
+        found = subprocess.run(['docker', 'run', *pin.args(), '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', 'mcr.microsoft.com/dotnet/sdk:10.0',
+                                '/ds/DedicatedServer64/Sandbox.Game.dll'], capture_output=True, text=True).stdout.split()
     return found[0][:16] if found else None
 
 
@@ -291,8 +302,10 @@ def run_stage(stage):
     command.append(result_file)
 
     env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PLUGINCHECK_SECONDS_AFTER': str(int(max((seconds_from(c) for c in after[stage]), default=0)))}
-    # In the lane, one stage at a time on its slot, and behaviour only discovers.
-    with (lane.stage() if lane else contextlib.nullcontext()) as cores, open(os.path.join(run_dir, stage + '.log'), 'w', encoding='utf-8') as log:
+    # A Docker stage of a full run waits here while an exclusive request waits or holds, and counts as running until it ends. In the
+    # lane, one stage at a time on its slot, and behaviour only discovers.
+    gate = hold.stage(stage) if hold and stage not in NO_DOCKER else contextlib.nullcontext()
+    with gate, (lane.stage() if lane else contextlib.nullcontext()) as cores, open(os.path.join(run_dir, stage + '.log'), 'w', encoding='utf-8') as log:
         # Timed from here, so a stage that waited for the lane's slot does not count the wait as its own time.
         start = time.time()
         if lane:
@@ -368,9 +381,12 @@ try:
     for worker in workers:
         worker.join()
 finally:
-    # The lane's slot goes back to the run that lent it, or to the machine, as soon as its half is done.
+    # The lane's slot goes back to the run that lent it, or to the machine, as soon as its half is done. A waiting exclusive request is
+    # granted as soon as the run's last stage is over, not after the clean-up.
     if lane:
         lane.release()
+    if hold:
+        hold.close()
 results['stages'] = {s: results['stages'][s] for s in STAGES if s in results['stages']}
 
 path = results_path

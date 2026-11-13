@@ -9,7 +9,10 @@ seconds returns, but a slot whose borrowed container still runs is not reused un
 session's container.
 
 An exclusive request, for measurements that need a quiet machine, drains everything: no new grants, no new PluginCheck
-servers, and it is granted once nothing else runs.
+servers, and it is granted once nothing else runs. "Nothing else" is checked three ways: no PluginCheck server (the behaviour
+stage's owner), no stage of a full run (RunHold: each Docker-using stage of check.py waits at its start while an exclusive request
+waits or holds, so every stage boundary is a hold point), and no running container the lease file does not know
+(unknown_containers). exclusive_blockers says what the drain still waits for.
 
 PluginCheck's own pre-container lane (check.py --pre) takes one slot as the session LANE. It counts against neither borrower limit,
 so with 3 sessions borrowing 2 slots each a run keeps 16 - 6 - 1 = 9. It is granted like any lease, gives its slot back when it
@@ -33,6 +36,13 @@ RELEASE_SECONDS = 10
 SESSION = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
 # PluginCheck's pre-container lane: at most one slot, outside MAX_SESSIONS and MAX_PER_SESSION. lease.py refuses the name.
 LANE = 'plugincheck-pre'
+# Containers that are not anyone's work and never stop, such as Docker's own build daemon: never "unknown". More prefixes in
+# PLUGINCHECK_IGNORE_CONTAINERS, comma separated.
+IGNORED_CONTAINERS = ('buildx_buildkit_',)
+# The stage that has its own owner (behaviour: its servers count themselves). Every other Docker stage is a run's to count.
+OWN_OWNER_STAGE = 'behaviour'
+# "The running containers were not read": the exclusive grant then looks only at the lease file, as before.
+NOT_CHECKED = object()
 
 
 def docker_names():
@@ -52,7 +62,7 @@ def running_check(names):
 
 
 def empty():
-    return {'owner': None, 'requests': [], 'leases': [], 'orphans': []}
+    return {'owner': None, 'requests': [], 'leases': [], 'orphans': [], 'runs': []}
 
 
 # ---- Decisions: pure functions of a state and the time ----
@@ -104,10 +114,13 @@ def grant(state, request, cores, now):
     return lease
 
 
-def expire(state, now, container_running=lambda name: False):
+def expire(state, now, container_running=lambda name: False, alive=None):
     """Leases with no heartbeat for HEARTBEAT_LIMIT end. Their slots come back, unless the borrowed container still runs: then
-    the slot stays out of use as an orphan until it stops. Returns the cores that came back."""
+    the slot stays out of use as an orphan until it stops. Runs that stopped beating, or whose process is gone, end too.
+    Returns the cores that came back."""
     back = []
+    alive = alive or process_alive
+    state['runs'] = [r for r in state.get('runs', []) if now - r.get('heartbeat', 0) <= OWNER_LIMIT and alive(r.get('pid'))]
     for lease in list(state['leases']):
         if now - lease['heartbeat'] > HEARTBEAT_LIMIT:
             state['leases'].remove(lease)
@@ -164,17 +177,21 @@ def release(state, session, cores=None):
     return [l['cores'] for l in gone if not l.get('exclusive')]
 
 
-def grant_when_idle(state, now, all_cores):
-    """With no PluginCheck run going, requests are granted straight from the slots no lease holds."""
+def grant_when_idle(state, now, all_cores, containers=NOT_CHECKED):
+    """With no PluginCheck run going, requests are granted straight from the slots no lease holds. An exclusive request is also
+    held back by a stage of a full run, and, when containers (docker_names()) is given, by any running container the lease file
+    does not know."""
     if owner_active(state, now):
         return []
     granted = []
     exclusive = next((r for r in sorted(state['requests'], key=lambda r: r['since']) if r.get('exclusive')), None)
-    if exclusive and not state['leases'] and not state['orphans']:
+    if exclusive and not exclusive_blockers(state, now, 0, containers):
         state['leases'].append({'session': exclusive['session'], 'cores': 'all', 'index': 1, 'granted': now, 'heartbeat': now,
                                 'container': '', 'exclusive': True, 'purpose': exclusive.get('purpose', '')})
         state['requests'].remove(exclusive)
         return ['all']
+    if exclusive:
+        return []
     taken = {l['cores'] for l in state['leases'] + state['orphans']}
     for cores in all_cores:
         if cores in taken:
@@ -197,15 +214,79 @@ def owner_may_start(state):
     return not exclusive_wanted(state)
 
 
-def owner_grant_exclusive(state, now, running):
-    """With an exclusive request waiting, it is granted once PluginCheck runs nothing and no slot is lent or orphaned."""
+def owner_grant_exclusive(state, now, running, containers=NOT_CHECKED, own_stage=False):
+    """With an exclusive request waiting, it is granted once PluginCheck runs nothing and no slot is lent or orphaned, no stage of
+    a full run is going (the behaviour stage's own owner passes own_stage: it counts its servers itself), and, when containers
+    (docker_names()) is given, no running container is unknown to the lease file."""
     exclusive = next((r for r in sorted(state['requests'], key=lambda r: r['since']) if r.get('exclusive')), None)
-    if exclusive and running == 0 and not state['leases'] and not state['orphans']:
+    if exclusive and not exclusive_blockers(state, now, running, containers, own_stage):
         state['leases'].append({'session': exclusive['session'], 'cores': 'all', 'index': 1, 'granted': now, 'heartbeat': now,
                                 'container': '', 'exclusive': True, 'purpose': exclusive.get('purpose', '')})
         state['requests'].remove(exclusive)
         return True
     return False
+
+
+# ---- The quiet machine: what a drain waits for ----
+
+def ignored_container(name):
+    extra = tuple(p.strip() for p in os.environ.get('PLUGINCHECK_IGNORE_CONTAINERS', '').split(',') if p.strip())
+    return name.startswith(IGNORED_CONTAINERS + extra)
+
+
+def unknown_containers(state, names):
+    """The running containers the lease file does not know: not a lease's or an orphan's container, not one named after the session that
+    holds the exclusive lease (its rig's), not ignored. None when Docker could not be asked."""
+    if names is None:
+        return None
+    known = {l['container'] for l in state['leases'] + state['orphans'] if l.get('container')}
+    mine = tuple(l['session'] + '-' for l in state['leases'] if l.get('exclusive'))
+    return sorted(n for n in names if n not in known and not n.startswith(mine) and not ignored_container(n))
+
+
+def fresh_runs(state, now):
+    return [r for r in state.get('runs', []) if now - r.get('heartbeat', 0) <= OWNER_LIMIT]
+
+
+def run_stages(state, now, ignoring=()):
+    """The Docker stages of full runs in progress."""
+    return sorted({s for r in fresh_runs(state, now) for s in r.get('stages', []) if s not in ignoring})
+
+
+def exclusive_blockers(state, now, running=0, containers=NOT_CHECKED, own_stage=False):
+    """Why an exclusive request is not granted yet, in words. Empty when it may be."""
+    why = []
+    if running:
+        why.append(f'{running} PluginCheck server{"s" if running != 1 else ""} running')
+    stages = run_stages(state, now, (OWN_OWNER_STAGE,) if own_stage else ())
+    if stages:
+        why.append('stages of a full run: ' + ', '.join(stages))
+    if state['leases']:
+        why.append('leases held by ' + ', '.join(sorted({l['session'] for l in state['leases']})))
+    if state['orphans']:
+        why.append('slots whose borrowed container still runs: ' + ', '.join(sorted(o['cores'] for o in state['orphans'])))
+    if containers is not NOT_CHECKED:
+        unknown = unknown_containers(state, containers)
+        if unknown is None:
+            why.append('Docker could not be asked, so the running containers are not known')
+        elif unknown:
+            why.append('containers the lease file does not know: ' + ', '.join(unknown))
+    return why
+
+
+def put_run(state, now, pid, target, stages):
+    """A full run's entry: who, when it last beat, and the Docker stages it has in progress."""
+    state['runs'] = [r for r in state.get('runs', []) if r.get('pid') != pid]
+    state['runs'].append({'pid': pid, 'target': target, 'heartbeat': now, 'stages': sorted(stages)})
+
+
+def drop_run(state, pid):
+    state['runs'] = [r for r in state.get('runs', []) if r.get('pid') != pid]
+
+
+def run_may_begin(state):
+    """False while an exclusive request waits or holds: a full run starts no Docker stage."""
+    return not exclusive_wanted(state)
 
 
 # ---- The file, under a lock ----
@@ -370,9 +451,10 @@ class Owner:
 
     def beat(self, running):
         try:
-            running_now = running_check(self.names())
+            names = self.names()
         except Exception:
-            running_now = running_check(None)
+            names = None
+        running_now = running_check(names)
         failed = None
         with Store(self.folder) as state:
             now = self.clock()
@@ -380,7 +462,8 @@ class Owner:
             state['owner'] = self.owner_entry(now, running)
             try:
                 expire(state, now, running_now)
-                owner_grant_exclusive(state, now, running)
+                # The exclusive lease also waits for the other stages of the run and for any container the lease file does not know.
+                owner_grant_exclusive(state, now, running, names, own_stage=True)
             except Exception as error:
                 failed = error
             exclusive = any(l.get('exclusive') for l in state['leases'])
@@ -500,14 +583,14 @@ class Lane:
     def ask(self):
         """Asks for the slot once. Returns its cores once granted, else None."""
         try:
-            running_now = running_check(self.names())
+            names = self.names()
         except Exception:
-            running_now = running_check(None)
+            names = None
         with Store(self.folder) as state:
             now = self.clock()
-            expire(state, now, running_now)
+            expire(state, now, running_check(names))
             request(state, LANE, 1, now, purpose='PluginCheck pre-container lane')
-            grant_when_idle(state, now, self.all_cores)
+            grant_when_idle(state, now, self.all_cores, names)
             mine = held(state, LANE)
             return mine[0]['cores'] if mine else None
 
@@ -613,3 +696,123 @@ class Lane:
             self.changed.notify_all()
         if not self.give_back_until_done(seconds=RELEASE_SECONDS):
             self.say(f'lane: the slot could not be given back, so its lease ends by itself {HEARTBEAT_LIMIT // 60} minutes after the last heartbeat')
+
+
+class RunHold:
+    """A full check.py run's side of the quiet-machine hold (README, Exclusive requests).
+
+    The run registers for its whole life, and counts each Docker-using stage while it runs. Before a stage starts, begin() waits while
+    an exclusive request waits or holds, so every stage boundary is a hold point; the check and the count are one step under the
+    lease file's lock, so a request that arrives is never granted beside a stage that has just started. When a stage ends, or the
+    run does, a waiting exclusive request is granted at once if nothing else runs. A thread keeps the run's heartbeat and tries the
+    grant too (a container that was still stopping when the stage ended). A lease file that can't be read or locked never stops a
+    run: the stage starts, once noted, as lending does."""
+
+    def __init__(self, target, folder=FOLDER, names=docker_names, clock=time.time, poll=5, beat_every=30, say=print):
+        self.target, self.folder, self.names, self.clock = target, folder, names, clock
+        self.poll, self.beat_every, self.say = poll, beat_every, say
+        self.pid, self.stages = os.getpid(), []
+        self.mine, self.stopped, self.thread, self.noted = threading.Lock(), threading.Event(), None, set()
+        self.fetch, self.seen = threading.Lock(), None
+
+    def note(self, what, error):
+        if what not in self.noted:
+            self.noted.add(what)
+            self.say(f'hold: {what} failed ({type(error).__name__}: {error}), carrying on')
+
+    def read_names(self, max_age=0):
+        """docker_names(), at most max_age seconds old, so the stages waiting together ask Docker once between them."""
+        with self.fetch:
+            if max_age > 0 and self.seen is not None and self.clock() - self.seen[0] <= max_age:
+                return self.seen[1]
+            try:
+                found = self.names()
+            except Exception:
+                found = None
+            self.seen = (self.clock(), found)
+            return found
+
+    def write(self, state, now):
+        put_run(state, now, self.pid, self.target, self.stages)
+
+    def start(self):
+        """Registers the run, with no stage yet, and starts the heartbeat."""
+        try:
+            with Store(self.folder) as state:
+                self.write(state, self.clock())
+        except Exception as error:
+            self.note('registering the run', error)
+        if self.thread is None:
+            self.thread = threading.Thread(target=self.keep, daemon=True)
+            self.thread.start()
+
+    def begin(self, stage):
+        """Waits while an exclusive request waits or holds, then counts the stage as running."""
+        waited = False
+        while True:
+            # A hold that lasts is checked for a request or lease that has lapsed, which only expire() ends.
+            names = self.read_names(self.poll) if waited else None
+            try:
+                with Store(self.folder) as state:
+                    now = self.clock()
+                    if waited:
+                        expire(state, now, running_check(names))
+                    if run_may_begin(state) or self.stopped.is_set():
+                        with self.mine:
+                            self.stages.append(stage)
+                        self.write(state, now)
+                        if waited:
+                            self.say(f'hold: the exclusive request is done, so {stage} starts')
+                        return
+            except Exception as error:
+                self.note('checking for an exclusive request', error)
+                with self.mine:
+                    self.stages.append(stage)
+                return
+            if not waited:
+                waited = True
+                self.say(f'hold: an exclusive request waits or holds the machine, so {stage} waits to start')
+            self.stopped.wait(self.poll)
+
+    def end(self, stage):
+        """The stage is over: it no longer counts, and a waiting exclusive request is granted if nothing else runs."""
+        with self.mine:
+            if stage in self.stages:
+                self.stages.remove(stage)
+        self.beat()
+
+    def beat(self):
+        names = self.read_names()
+        try:
+            with Store(self.folder) as state:
+                now = self.clock()
+                expire(state, now, running_check(names))
+                self.write(state, now)
+                owner_grant_exclusive(state, now, 0, names)
+        except Exception as error:
+            self.note('beating', error)
+
+    def keep(self):
+        while not self.stopped.wait(self.beat_every):
+            self.beat()
+
+    @contextlib.contextmanager
+    def stage(self, name):
+        self.begin(name)
+        try:
+            yield
+        finally:
+            self.end(name)
+
+    def close(self):
+        """The run is over. Its entry goes, and a waiting exclusive request is granted if nothing else runs."""
+        self.stopped.set()
+        names = self.read_names()
+        try:
+            with Store(self.folder) as state:
+                now = self.clock()
+                drop_run(state, self.pid)
+                expire(state, now, running_check(names))
+                owner_grant_exclusive(state, now, 0, names)
+        except Exception as error:
+            self.note('ending the run', error)
