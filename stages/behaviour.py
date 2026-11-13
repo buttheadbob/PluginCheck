@@ -975,7 +975,7 @@ def compare(plan):
             print(f"{'UNSTABLE' if d['unstable'] else 'DIFF'}  {d['scenario']}  {d['grid']} {d['field']}: {left}={d[left.replace('-', '_')]}  {right}={d[right.replace('-', '_')]}")
         real.extend(found)
     done = [r for (_, s, _), r in records.items() if s == plan['name'] and 'after' in r]
-    if done and not any(changes(r) for r in done):
+    if done and not any(changes(r) for r in done) and plan['name'] not in quiet:
         quiet.append(plan['name'])
 
 
@@ -1031,9 +1031,11 @@ def take(build, repeat, results):
 for (build, batch, repeat), results in kept_results:
     take(build, repeat, results)
 
+finished = 0
 with concurrent.futures.ThreadPoolExecutor(workers) as pool:
     futures = {pool.submit(run_and_remember, b, batch, r): (b, batch, r) for b, batch, r in jobs}
     for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
+        finished = done
         build, batch, repeat = futures[future]
         results = future.result()
         elapsed = time.time() - started
@@ -1050,13 +1052,28 @@ suspect = ({d['scenario'] for d in real} & later) | set(wrongly_classified)
 if suspect:
     print(f'{len(suspect)} scenarios that shared a server showed a difference, so they rerun alone before anything is reported', flush=True)
     again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if runs_on(b, by_name[n]) for r in range(REPEATS)]
+    # They join the count, so the progress never says done while these still run.
+    total = len(jobs) + len(again)
     with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        futures = {pool.submit(run_and_remember, b, [p], r): (b, r) for b, p, r in again}
+        futures = {pool.submit(run_and_remember, b, [p], r): (b, r, p['name']) for b, p, r in again}
         for future in concurrent.futures.as_completed(futures):
-            build, repeat = futures[future]
+            build, repeat, alone = futures[future]
+            finished += 1
+            elapsed = time.time() - started
+            left = (total - finished) * elapsed / max(finished, 1)
+            status(kind='progress', done=finished, total=total, left=int(left), overall=int(left + after_stage), failed=len(failures))
+            print(f"[{finished}/{total} {finished * 100 // total}%] {clock(left)} left here, {clock(left + after_stage)} left overall  |  "
+                  f"{build['name']}  alone: {alone}", flush=True)
             for record in future.result():
                 note_arguments(record)
-                records[build['name'], record['scenario'], repeat] = record
+                key = build['name'], record['scenario'], repeat
+                # A rerun that never finished says nothing about the command, and the result it would replace does.
+                if record.get('state') == 'recorded' or key not in records:
+                    records[key] = record
+                reason = record.get('failed') or record.get('blocked') or (None if record.get('state') == 'recorded' else record.get('state'))
+                if reason:
+                    failures.append({'build': build['name'], 'scenario': record['scenario'], 'reason': f'alone: {reason}'[:400]})
+                    print(f"FAILED  {build['name']}  {record['scenario']} did not finish alone, so its difference was not settled: {str(reason)[:200]}", flush=True)
     real[:] = [d for d in real if d['scenario'] not in suspect]
     unstable_kept = {k: v for k, v in unstable.items() if k[0] not in suspect}
     unstable.clear()
@@ -1079,6 +1096,6 @@ print('Results say a server finished. To know how far each command got, read beh
 print('Each difference is a lead: it says two builds disagree, not which is right. No differences would say only that these scenarios agreed.')
 crashed = any('stack' in f['reason'].lower() for f in failures)
 finish('fail' if crashed or unhandled else 'review', builds=[{k: b.get(k) for k in ('name', 'host', 'published', 'version', 'from')} for b in builds], scenarios=[p['name'] for p in plans],
-       servers=len(jobs), reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
+       servers=len(jobs), aloneReruns=len(again) if suspect else 0, reused=len(kept_results), failures=failures, differences=real, unstable=[{'scenario': k[0], 'grid': k[1], 'field': k[2], 'builds': sorted(v)} for k, v in unstable.items()],
        noChange=quiet, wrongArguments=wrong_arguments, notHandled=not_handled, noExample=sorted(no_example), skipped=skipped, wronglyClassified=wrongly_classified, filtered=bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_ONLY')), buildsLeftOut=broken,
        note='A difference is a lead. No differences proves nothing beyond these scenarios.')
