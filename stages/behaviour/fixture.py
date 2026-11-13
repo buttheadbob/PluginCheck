@@ -106,6 +106,12 @@ def connector_pair(parent_name, sub_name, at, owner):
     return [grid(parent_name, at, parent), grid(sub_name, sub_at, sub)]
 
 
+def pad(name, at):
+    """A static plate just under a grid at this position. 0.1 m of air keeps the two from starting inside each other."""
+    plate = [armor((x, 0, z)) for x in range(-1, 4) for z in range(-1, 3)]
+    return [grid(name, (at[0], at[1] - LARGE_BLOCK - 0.1, at[2]), plate, static=True)]
+
+
 def world(moon_position=None, moon_radius=None):
     """Every grid in the fixture, as sector objects."""
     Ids.next = 510000000000000000
@@ -130,12 +136,13 @@ def world(moon_position=None, moon_radius=None):
     ]):
         grids += build(at(slot))
     if moon_position:
-        # Inside the moon's gravity, which ends at 5% strength: 9785 * 5^(1/7), about 12300 m from its centre. High enough that a grid falling
-        # from here is still in the air when a scenario ends.
+        # Inside the moon's gravity, which ends at 5% strength: 9785 * 5^(1/7), about 12300 m from its centre. Each stands on a static pad, because
+        # a grid left to fall hits the moon about a minute later, so what a scenario found depended on how long its server had been up.
         x, y, z = moon_position
         high = moon_radius + 2500
-        grids += plain('planet-large', (x, y + high, z), OLD_PLAYER)
-        grids += rotor_pair('planet-rotor-parent', 'planet-rotor-sub', (x + SPACING, y + high, z), OLD_PLAYER)
+        for name, at, build in (('planet-pad', (x, y + high, z), lambda p: plain('planet-large', p, OLD_PLAYER)),
+                                ('planet-pad-2', (x + SPACING, y + high, z), lambda p: rotor_pair('planet-rotor-parent', 'planet-rotor-sub', p, OLD_PLAYER))):
+            grids += pad(name, at) + build(at)
     return grids
 
 
