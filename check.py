@@ -169,7 +169,7 @@ def time_left():
     return max((seconds_from(s) for s in planned if s not in finished_stages), default=0)
 
 
-display = Display(target['name'], planned, past, time_left)
+display = Display(target['name'], planned, past, time_left, run_dir)
 refused = githubtoken.check()
 if refused:
     display.line('WARN  ' + refused)
