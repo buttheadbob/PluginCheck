@@ -159,7 +159,9 @@ plugin does and records the result. It needs nothing written by a person, and ru
 3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
    probe has its record. Its cores go back at the kill, and its logs are copied and its container removed while the next server starts.
    The probe also copies its record into a small folder mounted from this computer, so the wait sees it without asking Docker. Docker is
-   asked every 5 seconds instead of every second, for a record the copy missed, a Torch fatal error, or a server that ended.
+   asked every 5 seconds instead of every second, for a record the copy missed, a Torch fatal error, or a server that ended. A server
+   that writes no log line for 10 minutes, has no record and isn't compiling ends there as a timeout, with its last lines, instead of
+   waiting out the 20 minutes. The run goes on, and a scenario that itself waits longer in one go gets that long and a minute more.
 4. **Compares:** the published build against each working build, and the working builds against each other.
 
 Published builds come from the repositories listed on MagnetarHub and QuasarHub, and from torchapi.com, into `cache/behaviour`. A plugin
