@@ -232,8 +232,9 @@ such as mod or Torch fixes. They may not borrow them to check another plugin: th
 - A lease with no heartbeat for 5 minutes ends. If its container still runs, the slot stays out of use until it stops.
   PluginCheck never stops another session's container.
 - An exclusive request, for measurements that need a quiet machine, drains everything: no new lease, no new PluginCheck
-  server and no new Docker stage of a full run. Whatever is running finishes the step it is on: a server, or one stage. The lease is
-  granted, as cores `all`, once nothing else runs:
+  server and no new Docker stage of a full run. Whatever is running finishes the step it is on: a server, or one stage. A server that
+  was still waiting for a slot when the request came does not start: it gives the slot back and waits until the request is done. The
+  lease is granted, as cores `all`, once nothing else runs:
   - no PluginCheck server, and no Docker stage of a full run (`check.py` registers for its whole life and every stage that starts a
     container waits at its start while a request waits or holds, so each stage boundary is a hold point; `--pre`'s lane steps aside
     as before);

@@ -452,6 +452,8 @@ class Owner:
             return set(self.lent)
 
     def beat(self, running):
+        """running: the servers running, or a function giving it. A function is read under the lock, so a server counted while Docker
+        was asked still holds an exclusive grant back."""
         try:
             names = self.names()
         except Exception:
@@ -460,6 +462,7 @@ class Owner:
         failed = None
         with Store(self.folder) as state:
             now = self.clock()
+            running = running() if callable(running) else running
             # The heartbeat is saved even if what follows fails: a silent owner would be taken for idle, and lent from freely.
             state['owner'] = self.owner_entry(now, running)
             try:

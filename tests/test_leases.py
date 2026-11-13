@@ -257,6 +257,24 @@ class OwnerAndFile(unittest.TestCase):
         with leases.Store(self.folder) as state:
             self.assertEqual([l['cores'] for l in state['leases']], ['all'])
 
+    def test_the_running_count_is_read_under_the_lock(self):
+        """A server counted after the beat began, but before it took the lock, holds the grant back: the count is read under the lock."""
+        self.owner.start()
+        self.borrow('bench', 1, exclusive=True)
+        reads = []
+
+        def count():
+            reads.append(os.path.isdir(os.path.join(self.folder, 'leases.lock')))
+            return 1
+        self.owner.beat(count)
+        self.assertEqual(reads, [True])
+        with leases.Store(self.folder) as state:
+            self.assertEqual(state['leases'], [])
+            self.assertEqual(state['owner']['servers'], 1)
+        self.owner.beat(lambda: 0)
+        with leases.Store(self.folder) as state:
+            self.assertEqual([l['cores'] for l in state['leases']], ['all'])
+
     def hold(self, pid, age):
         lock = os.path.join(self.folder, 'leases.lock')
         os.makedirs(lock)

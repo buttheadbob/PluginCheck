@@ -111,6 +111,48 @@ class RunningTests(unittest.TestCase):
         self.assertEqual(seen, {'after free': 1, 'slot back': 1})
         self.assertEqual(running[0], 0)
 
+    def test_a_server_that_waited_for_a_slot_starts_nothing_while_an_exclusive_request_waits(self):
+        """Spare pool threads look at the lease file, then wait for a slot. An exclusive request made while they wait holds them back too:
+        the slot goes back, and the server starts once the request is done. Its second look comes while it already counts as running, so a
+        beat never grants the request beside a server that is about to start."""
+        import queue
+        tree = ast.parse(open(SOURCE, encoding='utf-8').read())
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_server']
+        slots, running, started, looks, wanted = queue.Queue(), [0], [], [], [False]
+
+        def may_start():
+            looks.append(running[0])
+            return not wanted[0]
+
+        def serve(build, batch, save, probe_zip, cores, timing, free):
+            started.append(cores)
+            free()
+            return [{'scenario': 's'}]
+        lending = types.SimpleNamespace(may_start=may_start, free=lambda cores: None, note=lambda *a: None)
+        clock = types.SimpleNamespace(time=time.time, sleep=lambda seconds: time.sleep(0.01))
+        namespace = {'time': clock, 'lending': lending, 'slots': slots, 'running': running, 'running_lock': threading.Lock(), 'status': lambda **f: None,
+                     'serve': serve, 'server_timing': types.SimpleNamespace(summary=lambda t, p: (None, {})), 'ending': threading.Event()}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), namespace)
+        waiter = threading.Thread(target=namespace['run_server'], args=({'name': 'b'}, [{'name': 's'}], None, None), daemon=True)
+        waiter.start()
+        time.sleep(0.2)
+        self.assertEqual(looks, [0], 'it looked once, and now waits for a slot')
+        wanted[0] = True
+        slots.put('0-1')
+        time.sleep(0.3)
+        self.assertEqual(started, [], 'a server started while an exclusive request waited')
+        self.assertIn(1, looks, 'the second look came while it counted as running')
+        self.assertEqual((running[0], list(slots.queue)), (0, ['0-1']), 'the slot went back and the count with it')
+        wanted[0] = False
+        waiter.join(5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(started, ['0-1'])
+        self.assertEqual(running[0], 0)
+
+    def test_the_lending_beat_reads_the_running_count_itself(self):
+        source = open(SOURCE, encoding='utf-8').read()
+        self.assertTrue('lending.beat(lambda: running[0])' in source, 'keep_lending passes the count itself, read under the lease file lock')
+
 
 class WaitTests(LiftedServe):
     def test_the_marker_is_seen_without_asking_docker_again(self):
