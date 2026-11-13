@@ -198,8 +198,8 @@ Nothing is shared between systems, so an update or a layout change in one cannot
 | Quasar-managed | `plugincheck-ds-quasar` volume | Per run |
 | Torch | `plugincheck-ds-torch` volume | Per run |
 
-Test servers are private and send no telemetry: Torch analytics are off, Magnetar runs with `-consent deny`, and Quasar
-uploads nothing without an admin's consent. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
+Test servers are private. Torch analytics are off, and Quasar uploads nothing without an admin's consent. Magnetar runs with its
+defaults: it adds its companion mod MagnetarMod to the world, and turns its own telemetry off when it has no interactive terminal, as in these containers. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
 library hits internal asserts under Legacy and would upload a crash dump for each. Failed test runs do not reach anyone's error
 reports.
 
