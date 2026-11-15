@@ -295,7 +295,9 @@ holds:
 python -I lease.py gate --purpose "Inertia build" [--timeout 600] [--session NAME]
 ```
 
-- It waits while an exclusive request waits or holds, then exits 0 and prints `{"gate": "free", ...}`.
+- It waits while an exclusive request waits or holds, and while a PluginCheck run is going (One run at a time), then exits 0 and
+  prints `{"gate": "free", ...}`. A session with an exclusive claim of its own passes `--session` and is not held back by a run: the run
+  holds for its claim at the next step.
 - With `--timeout` it exits 3 once that many seconds have passed with the gate still shut (`0` looks once). The message, on stderr,
   names who claims the machine and since when, and what a waiting claim still waits for; stdout has `{"gate": "shut", "claims": [...]}`.
 - Without `--timeout` it waits as long as the claim lasts, with a line on stderr every 5 minutes. A tool with its own time limit passes
@@ -306,6 +308,24 @@ python -I lease.py gate --purpose "Inertia build" [--timeout 600] [--session NAM
   the claim's holder waits for that itself, such as by watching the processes and CPU. Nothing is paused or suspended.
 - From Python: put this folder on `sys.path`, `import lease`, and call `lease.gate("Inertia build", timeout=600)`. It returns the seconds
   it waited, or raises `lease.GateTimeout`, whose `claims` lists the same words.
+
+## One run at a time
+One item uses the machine at a time; the rest queue. A full run, and the `--continue` half, waits for the run before it to end, from
+any copy of this version and whatever lease folder it uses:
+
+```
+another PluginCheck run is going: one at a time, so this run waits for its turn (0 s so far)
+the run before has ended after 412 s, so this run starts
+```
+
+- The turn is a lock the operating system holds for the run's process (`stages/leases.py`, `RunQueue`: a named mutex in the logon
+  session on Windows, `flock` elsewhere). It is freed when the process ends, however it ends, so no turn is left behind. Waiting runs
+  are not promised first-come order. `PLUGINCHECK_RUN_QUEUE` gives it another name, for tests only.
+- It takes the turn before anything starts, and a line every 5 minutes says it still waits. Ctrl-C while waiting ends it.
+- The machine gate stays shut while a run holds the turn, so other sessions' builds and live runs queue too. Exclusive requests work
+  as before: a run holding the turn still holds still at its next step for one.
+- `--pre` does not queue: the lane is part of the run whose `behaviour` stage it overlaps.
+- What it cannot cover: a copy of an earlier version (it neither takes nor looks at the turn), and another Windows logon session.
 
 ## Pre-container lane
 A run can be split in two, so that everything before `behaviour` happens while another run's `behaviour` still has the machine:
@@ -399,6 +419,7 @@ Containers are not a hard security boundary. Do not run a plugin you would not t
 | `PULSAR_GITHUB_TOKEN` | A GitHub token, in place of `github-token.txt` |
 | `PLUGINCHECK_USER_RESERVED_CORES` | The user's own logical cores, never in a slot or a container's cpuset. The default is `24-31`; empty for none |
 | `PLUGINCHECK_BENCH_SESSIONS` | The fnmatch pattern of bench sessions, which may borrow 4 adjacent slots. The default is `physbench-*`; empty for none |
+| `PLUGINCHECK_RUN_QUEUE` | Another name for the one-run-at-a-time turn, for tests that must not wait on a real run |
 
 ## Add a plugin
 Add `targets/<name>.json`. Leave out the sections the plugin does not have:

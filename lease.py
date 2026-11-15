@@ -31,7 +31,8 @@ it is done), exclusiveHeld, and, while one waits, waitingFor: what the drain sti
 running containers the lease file does not know, or null when Docker could not be asked.
 
 gate is for work that holds no lease: a session's build, test suite or live run calls it first. It waits while an exclusive request
-waits or holds, then exits 0. With --timeout it exits 3 once that many seconds pass with the gate still shut (0: look once), and
+waits or holds, and while a PluginCheck run is going from any copy (one item at a time; a session with its own exclusive claim is not
+held back by a run, which holds for that claim), then exits 0. With --timeout it exits 3 once that many seconds pass with the gate still shut (0: look once), and
 names who claims the machine and since when. --session leaves that session's own claim out. It prints its waiting lines to stderr
 and one JSON line to stdout, starts nothing and changes nothing. Python callers import this file and call gate(purpose, timeout=...),
 which raises GateTimeout instead.

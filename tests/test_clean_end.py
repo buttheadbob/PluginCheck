@@ -384,8 +384,9 @@ class CheckInterruptTests(unittest.TestCase):
         os.makedirs(site)
         with open(os.path.join(site, 'sitecustomize.py'), 'w', encoding='utf-8') as f:
             f.write(NO_DOCKER)
+        # A run queue of its own, so a real run going on this machine does not make this check.py wait for its turn.
         env = {**os.environ, 'PYTHONPATH': site, 'PLUGINCHECK_MACHINE_DIR': os.path.join(folder, 'machine'), 'PLUGINCHECK_PLAIN': '1',
-               'CLEAN_END_FOLDER': folder}
+               'CLEAN_END_FOLDER': folder, 'PLUGINCHECK_RUN_QUEUE': f'pc-test-clean-end-{os.getpid()}'}
         output = os.path.join(folder, 'check.txt')
         code = interrupt_in_hidden_console(output, os.path.join(folder, 'stage-pid'),
                                            [sys.executable, os.path.join(root, 'check.py'), 'Fake', '--only', 'manifest'], env, how)

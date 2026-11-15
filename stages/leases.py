@@ -22,7 +22,8 @@ so with 3 sessions borrowing 2 slots each a run on 12 slots keeps 12 - 6 - 1 = 5
 granted like any lease, gives its slot back when it ends, and steps aside for an exclusive request (Lane).
 
 Work that holds no lease, such as a session's build, test suite or live run, calls the machine gate first (gate, lease.py gate): it
-waits while an exclusive request waits or holds, so a measurement can claim the machine at once and waits only for work already running.
+waits while an exclusive request waits or holds, so a measurement can claim the machine at once and waits only for work already running,
+and while a PluginCheck run is going. Runs themselves go one at a time from any copy: a second check.py waits for its turn (RunQueue).
 
 Everything lives in one JSON file, changed under a lock, so any session can use it from the command line (lease.py) and
 PluginCheck from Python. The decisions are plain functions of the state and the time, so they are tested without Docker.
@@ -990,6 +991,98 @@ class RunHold:
             self.note('ending the run', error)
 
 
+# ---- One run at a time: a second check.py waits for its turn (README, One run at a time) ----
+
+# The run queue's name. PLUGINCHECK_RUN_QUEUE gives another, such as for tests that must not wait on a real run.
+RUN_QUEUE = 'PluginCheck-run'
+
+
+class RunQueue:
+    """The machine's one-run-at-a-time turn, whatever lease folder a copy uses: a lock the operating system keeps for the process holding
+    it and frees when that process ends, however it ends, so no turn is ever left behind. On Windows a named mutex in this logon session,
+    elsewhere flock on a file in the temp folder. A full run takes it before it registers (check.py); the pre-container lane does not,
+    since it is part of the run whose behaviour stage it overlaps."""
+
+    def __init__(self, name=None):
+        self.name = name or os.environ.get('PLUGINCHECK_RUN_QUEUE') or RUN_QUEUE
+        self.handle = None
+
+    def take(self, seconds=0):
+        """True once this process holds the turn, waiting at most seconds for it. OSError when the operating system cannot wait on it."""
+        if self.handle is not None:
+            return True
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.CreateMutexW.restype = wintypes.HANDLE
+            kernel.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            handle = kernel.CreateMutexW(None, False, 'Local\\' + self.name)
+            if not handle:
+                raise OSError(ctypes.get_last_error(), f'the run queue {self.name} could not be opened')
+            # 0: taken; 0x80: taken from a process that ended holding it; 0x102: still held when the time ran out.
+            waited = kernel.WaitForSingleObject(handle, int(seconds * 1000))
+            if waited in (0, 0x80):
+                self.handle = handle
+                return True
+            error = ctypes.get_last_error()
+            kernel.CloseHandle(handle)
+            if waited != 0x102:
+                # WAIT_FAILED comes back at once: counted as a turn still held, a waiting run would ask again and again without end.
+                raise OSError(error, f'the run queue {self.name} could not be waited on (WaitForSingleObject gave {waited:#x})')
+            return False
+        import fcntl, tempfile
+        handle = open(os.path.join(tempfile.gettempdir(), self.name + '.lock'), 'a')
+        deadline = time.time() + seconds
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.handle = handle
+                return True
+            except OSError:
+                if time.time() >= deadline:
+                    handle.close()
+                    return False
+                time.sleep(0.1)
+
+    def release(self):
+        if self.handle is None:
+            return
+        handle, self.handle = self.handle, None
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.ReleaseMutex.argtypes = kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel.ReleaseMutex(handle)
+            kernel.CloseHandle(handle)
+        else:
+            handle.close()
+
+    def going(self):
+        """True while another process holds the turn. A look: taken and given straight back when free."""
+        if self.handle is not None:
+            return False
+        if self.take(0):
+            self.release()
+            return False
+        return True
+
+    def wait(self, say=print, poll=5, report_every=300):
+        """Waits for the turn and keeps it until release() or the process ends. Returns the seconds waited."""
+        started, told = time.time(), None
+        while not self.take(poll):
+            if told is None or time.time() - told >= report_every:
+                say(f'another PluginCheck run is going: one at a time, so this run waits for its turn ({time.time() - started:.0f} s so far)')
+                told = time.time()
+        if told is not None:
+            say(f'the run before has ended after {time.time() - started:.0f} s, so this run starts')
+        return time.time() - started
+
+
 # ---- The machine gate: work outside PluginCheck waits while the machine is claimed (README, Machine gate) ----
 
 class GateTimeout(TimeoutError):
@@ -1024,17 +1117,26 @@ def claims(state, now, session=None):
     return said
 
 
-def gate(purpose, timeout=None, session=None, folder=FOLDER, clock=time.time, sleep=time.sleep, poll=10, report_every=300, say=print):
-    """Waits while an exclusive lease is held or waiting, then returns the seconds it waited. Any session's build, test suite or live run
-    calls it first, so a measurement that claimed the machine waits only for work already running. With timeout (seconds, 0 for one
-    look) it raises GateTimeout once that has passed with the gate still shut. session leaves the caller's own claim out. It starts
-    nothing and changes nothing: it reads the lease file under its lock. A lease file it cannot read counts as shut, and is named."""
+def gate(purpose, timeout=None, session=None, folder=FOLDER, clock=time.time, sleep=time.sleep, poll=10, report_every=300, say=print,
+         queue=None):
+    """Waits while an exclusive lease is held or waiting, or a PluginCheck run is going, then returns the seconds it waited. Any session's
+    build, test suite or live run calls it first, so a measurement that claimed the machine waits only for work already running, and work
+    queues behind a run. With timeout (seconds, 0 for one look) it raises GateTimeout once that has passed with the gate still shut.
+    session leaves the caller's own claim out, and a session with an exclusive claim of its own is not held back by a run (the run holds
+    for that claim at its next step). It starts nothing and changes nothing: it reads the lease file under its lock and looks at the run
+    queue (RunQueue.going). A lease file it cannot read counts as shut, and is named."""
     started, told = clock(), None
     while True:
         left = None if timeout is None else timeout - (clock() - started)
         try:
             with Store(folder, wait=60 if left is None else max(1, min(60, left)), save=False) as state:
-                why = claims(state, clock(), session)
+                now = clock()
+                why = claims(state, now, session)
+                mine = session is not None and any(item.get('exclusive') and item['session'] == session
+                                                   for item in state['leases'] + state['requests'])
+                targets = sorted({r.get('target', '?') for r in fresh_runs(state, now)})
+            if not why and not mine and RunQueue(queue).going():
+                why = ['a PluginCheck run is going' + (f" ({', '.join(targets)})" if targets else '') + ': one at a time, so this waits until it ends']
         except Exception as error:
             why = [f'the lease file could not be read ({type(error).__name__}: {error})']
         waited = clock() - started

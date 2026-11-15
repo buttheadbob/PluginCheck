@@ -120,6 +120,12 @@ if args.pre:
     # Also on an early exit, so the slot never waits out the 5-minute lease limit.
     atexit.register(lane.release)
     print(f"the lane holds cores {os.environ['PLUGINCHECK_CPUSET']}", flush=True)
+# One run at a time on the machine, from any copy: a full run (and the --continue half) waits here for the run before it to end
+# (leases.RunQueue). The lane's half does not: it is part of the run whose behaviour stage it overlaps.
+if not args.pre:
+    turn = leases.RunQueue()
+    turn.wait(say=lambda text: print(text, flush=True))
+    atexit.register(turn.release)
 # A full run (and the --continue half) registers for its whole life, and holds still at each stage boundary while an exclusive request
 # (a measurement that needs a quiet machine) waits or holds the machine. The lane's half is a lease of its own and steps aside itself.
 hold = None

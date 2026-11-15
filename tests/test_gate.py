@@ -14,6 +14,18 @@ import leases
 import lease
 
 CORES = [f'{i}-{i + 1}' for i in range(0, 32, 2)]
+SAVED_QUEUE = os.environ.get('PLUGINCHECK_RUN_QUEUE')
+
+
+def setUpModule():
+    # The gate is also shut while a PluginCheck run is going: these tests use a run queue of their own, so a real run does not shut it.
+    os.environ['PLUGINCHECK_RUN_QUEUE'] = f'pc-test-gate-{os.getpid()}'
+
+
+def tearDownModule():
+    os.environ.pop('PLUGINCHECK_RUN_QUEUE', None)
+    if SAVED_QUEUE is not None:
+        os.environ['PLUGINCHECK_RUN_QUEUE'] = SAVED_QUEUE
 
 
 class Clock:
