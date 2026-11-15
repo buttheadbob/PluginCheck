@@ -17,7 +17,7 @@ ROOTS = ('serve', 'scenario_file', 'copy_world_files', 'build_torch_probe')
 DATA = {'work', 'here', 'repo', 'target', 'run_dir', 'result_path', 'cache', 'counter', 'options', 'extra', 'magnetar_cache',
         'magnetar_cache_lock', 'slots', 'lending', 'running', 'running_lock', 'watched', 'watched_lock'}
 MODULES = (os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py'),
-           os.path.join('behaviour', 'extraplugins.py'), 'startlog.py')
+           os.path.join('behaviour', 'extraplugins.py'), 'startlog.py', 'containers.py')
 FOLDERS = (os.path.join('behaviour', 'probe'), os.path.join('behaviour', 'torchprobe'))
 
 

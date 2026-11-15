@@ -5,6 +5,7 @@ When Docker Desktop's file sharing stalled, every server's launcher waited on it
 be killed, and servers piled up. Servers now get their files by docker cp before they start, and the watchdog ends the run if one is stuck.
 """
 import ast, contextlib, io, itertools, json, os, re, shutil, subprocess, sys, tarfile, tempfile, threading, time, types, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))
@@ -58,6 +59,17 @@ class Recorder:
         return [a[0] for a, _ in self.calls]
 
 
+sys.path.insert(0, os.path.join(ROOT, 'stages'))
+import containers  # noqa: E402
+
+
+@contextlib.contextmanager
+def patched(docker, sleep=lambda seconds: None):
+    """containers.docker replaced by docker, and its pauses by sleep."""
+    with mock.patch.object(containers, 'docker', docker), mock.patch.object(containers, 'time', types.SimpleNamespace(time=time.time, sleep=sleep)):
+        yield
+
+
 class StartTests(unittest.TestCase):
     """start_magnetar, start_legacy and start_torch, with docker recorded."""
 
@@ -83,21 +95,16 @@ class StartTests(unittest.TestCase):
             return answer()
         return Recorder(reply)
 
-    def functions(self, docker):
-        return load(('docker', 'DOCKER_SECONDS', 'TIMED_OUT', 'COPY_SECONDS', 'COPY_TRIES', 'copy', 'readable', 'hand_in', 'start_server', 'start_magnetar', 'start_legacy',
-                     'start_torch', 'VOLUMES', 'MAGNETAR', 'LEGACY', 'TORCH', 'NO_CRASH_REPORTS', 'CLUSTER_NODE', 'MEMORY_PER_SERVER_GIB'),
-                    githubtoken=types.SimpleNamespace(for_container=lambda: ([], None)))
-
     def start(self, host, docker):
-        space = self.functions(docker)
-        space['docker'] = docker
-        space['time'] = types.SimpleNamespace(time=time.time, sleep=lambda s: None)
+        space = load(('start_magnetar', 'start_legacy', 'start_torch', 'VOLUMES', 'MAGNETAR', 'LEGACY', 'TORCH', 'NO_CRASH_REPORTS', 'CLUSTER_NODE',
+                      'MEMORY_PER_SERVER_GIB'), start_server=containers.start_server, githubtoken=types.SimpleNamespace(for_container=lambda: ([], None)))
         container, volume = 'plugincheck-behaviour-1-1', 'plugincheck-behaviour-1-1-data'
-        if host == 'magnetar':
-            return space['start_magnetar']({}, self.seed, self.folder, container, volume, '0-1')
-        if host == 'legacy':
-            return space['start_legacy'](self.seed, self.folder, container, volume, '0-1')
-        return space['start_torch']({}, self.seed, self.folder, container, volume, '0-1')
+        with patched(docker):
+            if host == 'magnetar':
+                return space['start_magnetar']({}, self.seed, self.folder, container, volume, '0-1')
+            if host == 'legacy':
+                return space['start_legacy'](self.seed, self.folder, container, volume, '0-1')
+            return space['start_torch']({}, self.seed, self.folder, container, volume, '0-1')
 
     def test_created_then_copied_in_then_started(self):
         for host in ('magnetar', 'legacy', 'torch'):
@@ -107,7 +114,7 @@ class StartTests(unittest.TestCase):
                 self.assertEqual(docker.verbs(), ['create', 'cp', 'start'])
                 self.assertEqual(docker.calls[1][0], ('cp', '-', 'plugincheck-behaviour-1-1:/'))
                 self.assertEqual(docker.calls[2][0], ('start', 'plugincheck-behaviour-1-1'))
-                self.assertFalse(os.path.exists(os.path.join(self.folder, 'hand-in.tar')), 'the tar is removed once copied')
+                self.assertEqual([f for f in os.listdir(self.folder) if f.startswith('hand-in')], [], 'the tar is removed once copied')
 
     def test_the_hand_in_is_measured(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -163,13 +170,48 @@ class StartTests(unittest.TestCase):
         self.assertIn('if (Directory.Exists(marker))', finish)
 
 
+
+class SharedFolderTests(unittest.TestCase):
+    """The single stages share one run folder and run side by side (check.py), so two hand-ins into it must never touch each other's tar."""
+
+    def test_two_hand_ins_into_one_folder_at_once(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        source = os.path.join(folder, 'seed')
+        os.makedirs(source)
+        with open(os.path.join(source, 'a.txt'), 'w') as f:
+            f.write('x')
+        both_in, sent, tars, errors = threading.Barrier(2), {}, set(), []
+
+        def slow_copy(src, dest, archive=None, **_):
+            both_in.wait(5)  # both tars exist before either is sent or removed
+            tars.add(archive)
+            with tarfile.open(archive) as tar:
+                sent[dest] = sorted(tar.getnames())
+            both_in.wait(5)
+            return None
+
+        def run(name):
+            try:
+                self.assertIsNone(containers.hand_in(name, folder, {source: '/seed'}))
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+        with mock.patch.object(containers, 'copy', slow_copy), contextlib.redirect_stdout(io.StringIO()):
+            threads = [threading.Thread(target=run, args=(n,)) for n in ('plugincheck-magnetar-1', 'plugincheck-torch-1')]
+            [t.start() for t in threads]
+            [t.join(10) for t in threads]
+        self.assertEqual(errors, [])
+        self.assertEqual(len(tars), 2, 'each hand-in has a tar of its own: ' + repr(sorted(tars)))
+        self.assertEqual(set(sent), {'plugincheck-magnetar-1:/', 'plugincheck-torch-1:/'})
+        self.assertEqual([f for f in os.listdir(folder) if f.startswith('hand-in')], [], 'each tar is removed once copied')
+
 class CopyTests(unittest.TestCase):
     def copy(self, replies):
         replies = iter(replies)
         docker = Recorder(lambda args, options: next(replies))
         slept = []
-        space = load(('copy', 'COPY_SECONDS', 'COPY_TRIES'), docker=docker, time=types.SimpleNamespace(sleep=slept.append))
-        return space['copy']('c:/data/Magnetar/.', 'here'), docker, slept
+        with patched(docker, slept.append):
+            return containers.copy('c:/data/Magnetar/.', 'here'), docker, slept
 
     def test_a_timeout_is_tried_again(self):
         why, docker, slept = self.copy([answer(TIMED_OUT, err='docker cp gave no answer in 120s'), answer()])
@@ -197,31 +239,40 @@ class HandInTests(unittest.TestCase):
     def test_no_tar_is_left_behind_when_it_cannot_be_built(self):
         folder = tempfile.mkdtemp(prefix='pc-handin-')
         self.addCleanup(shutil.rmtree, folder, True)
-        space = load(('readable', 'hand_in'), copy=lambda *args, **options: None)
-        with self.assertRaises(OSError):
-            space['hand_in']('plugincheck-behaviour-1-1', folder, {os.path.join(folder, 'missing'): '/seed'})
+        with mock.patch.object(containers, 'copy', lambda *args, **options: None):
+            with self.assertRaises(OSError):
+                containers.hand_in('plugincheck-magnetar-1', folder, {os.path.join(folder, 'missing'): '/seed'})
         self.assertEqual([f for f in os.listdir(folder) if f.startswith('hand-in')], [])
+
+
+def hanging_docker():
+    """containers.docker with a real process that hangs standing in for the docker CLI, so this is subprocess's own timeout at work."""
+    def run(command, **options):
+        return subprocess.run([sys.executable, '-c', 'import time; time.sleep(60)'], **options, **NO_WINDOW)
+    fake = types.SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired, CompletedProcess=subprocess.CompletedProcess)
+
+    def docker(*args, **options):
+        with mock.patch.object(containers, 'subprocess', fake):
+            return containers.docker(*args, **options)
+    return docker
 
 
 class TimeLimitTests(unittest.TestCase):
     def test_a_hung_docker_call_returns_after_its_limit(self):
-        """A real process that hangs stands in for docker, so this is subprocess's own timeout at work."""
-        def run(command, **options):
-            return subprocess.run([sys.executable, '-c', 'import time; time.sleep(60)'], **options, **NO_WINDOW)
-        space = load(('docker', 'DOCKER_SECONDS', 'TIMED_OUT'), subprocess=types.SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
-                                                                                              CompletedProcess=subprocess.CompletedProcess))
         started = time.time()
-        said = space['docker']('exec', 'c', 'true', timeout=1)
+        said = hanging_docker()('exec', 'c', 'true', timeout=1)
         self.assertLess(time.time() - started, 20)
         self.assertEqual(said.returncode, TIMED_OUT)
         self.assertEqual(said.stderr, 'docker exec gave no answer in 1s')
 
     def test_every_docker_process_has_a_time_limit(self):
-        runs = [n for n in ast.walk(TREE) if isinstance(n, ast.Call) and ast.unparse(n.func) in ('subprocess.run', 'subprocess.Popen', 'subprocess.check_output')]
-        self.assertEqual(len(runs), 1, 'docker() is the one place a process starts')
+        shared = ast.parse(open(os.path.join(ROOT, 'stages', 'containers.py'), encoding='utf-8').read())
+        runs = [n for n in ast.walk(shared) if isinstance(n, ast.Call) and ast.unparse(n.func) == 'subprocess.run']
+        self.assertEqual(len(runs), 1, 'containers.docker() is the one place a docker process starts')
         self.assertIn('timeout', {k.arg for k in runs[0].keywords})
-        docker = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'docker')
-        self.assertIn(runs[0], list(ast.walk(docker)))
+        started = [n for n in ast.walk(TREE) if isinstance(n, ast.Call) and ast.unparse(n.func).startswith('subprocess.')]
+        self.assertEqual(started, [], 'behaviour.py starts no process of its own')
+        self.assertIn('return containers.docker(*args, **given)', TEXT)
 
     def test_builds_get_the_long_limit(self):
         self.assertIn('extraplugins.torch_plugin(spec, cache, work, docker_long,', TEXT)
@@ -246,9 +297,9 @@ class Watchdog:
             self.now[0] += seconds
 
         self.docker = docker or Recorder(reply)
-        self.space = load(('watched', 'WATCH_SECONDS', 'AGE_LIMIT', 'START_TIMEOUT', 'STALLED_WAIT', 'TIMED_OUT', 'LOOK_SECONDS', 'WAITING', 'waiting_on_a_share',
+        self.space = load(('watched', 'WATCH_SECONDS', 'AGE_LIMIT', 'START_TIMEOUT', 'STALLED_WAIT', 'LOOK_SECONDS', 'WAITING', 'waiting_on_a_share',
                            'watch_servers'),
-                          docker=self.docker, say_safely=self.said.append, time=types.SimpleNamespace(time=clock or (lambda: self.now[0]), sleep=sleep))
+                          docker=self.docker, say_safely=self.said.append, TIMED_OUT=TIMED_OUT, time=types.SimpleNamespace(time=clock or (lambda: self.now[0]), sleep=sleep))
         if not real_stop:
             self.space['stop_stalled'] = self.stopped.append
         self.space['watched'].update(servers)
@@ -301,10 +352,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_a_hung_docker_call_never_holds_up_the_watchdog(self):
         """Each look is a real hung process ended by its time limit; the age check still trips on time."""
-        def run(command, **options):
-            return subprocess.run([sys.executable, '-c', 'import time; time.sleep(60)'], **options, **NO_WINDOW)
-        real = load(('docker', 'DOCKER_SECONDS', 'TIMED_OUT'), subprocess=types.SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
-                                                                                             CompletedProcess=subprocess.CompletedProcess))['docker']
+        real = hanging_docker()
         dog = Watchdog({'plugincheck-behaviour-1-4': 1000.0 - 1400}, None, rounds=10, docker=lambda *a, **o: real(*a, **{**o, 'timeout': 1}))
         started = time.time()
         dog.run()
@@ -383,7 +431,7 @@ class ServeTests(unittest.TestCase):
         sys.path.insert(0, os.path.join(ROOT, 'stages'))
         import startlog
         tree = ast.parse(TEXT)
-        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {'serve', 'write', 'read_text', 'container_log', 'copy'}]
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {'serve', 'write', 'read_text', 'container_log'}]
         work = tempfile.mkdtemp(prefix='pc-nobind-')
         self.addCleanup(shutil.rmtree, work, True)
         calls = []
@@ -406,7 +454,8 @@ class ServeTests(unittest.TestCase):
                  'stall_limit': lambda batch: 600, 'options': {}, 'CHECK_SECONDS': 1, 'startlog': startlog, 'remember_magnetar_cache': lambda folder: None,
                  'seed_magnetar': lambda *a: None, 'seed_torch': lambda *a: None, 'start_magnetar': lambda *a: start_problem,
                  'start_legacy': lambda *a: start_problem, 'start_torch': lambda *a: start_problem, 'watched': watched, 'watched_lock': threading.Lock(),
-                 'TIMED_OUT': TIMED_OUT, 'LOOK_SECONDS': 30, 'CLEAN_SECONDS': 30, 'COPY_SECONDS': 120, 'COPY_TRIES': 2}
+                 'TIMED_OUT': TIMED_OUT, 'LOOK_SECONDS': 30, 'CLEAN_SECONDS': 30}
+        space['copy'] = lambda *args, archive=None: None if docker('cp', *args).returncode == 0 else f"docker cp {' '.join(args)} failed"
         exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), space)
         os.makedirs(os.path.join(work, 'save'))
         seen = []

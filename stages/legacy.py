@@ -8,15 +8,18 @@ It has its own dedicated server in the plugincheck-ds-legacy volume. Proton is n
 on real Windows before calling it a plugin defect.
 
 Run data must live on a Docker volume. .NET under Wine, which Proton is built on, fails with BadImageFormatException loading a larger DLL from a Windows
-folder mounted through Docker Desktop, while the same file loads from a volume. So settings are seeded in, and logs copied out.
+folder mounted through Docker Desktop, while the same file loads from a volume. So settings are seeded in, and logs copied out. The seed and
+the source are copied in before the server starts, so it holds no folder of this computer (containers.py), and every docker call has a
+time limit.
 """
-import datetime, glob, json, os, re, shutil, subprocess, sys, time
+import datetime, glob, json, os, re, shutil, sys, time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import githubtoken, repocopy, startlog
 import pin
+from containers import LOOK_SECONDS, STOP_SECONDS, TIMED_OUT, copy, docker, start_server
 
 IMAGE = os.environ.get('PLUGINCHECK_LEGACY_IMAGE', 'plugincheck-magnetar-legacy:latest')
 TIMEOUT = 45 * 60
@@ -44,10 +47,6 @@ volume = container + '-data'
 log_path = os.path.join(run_dir, 'legacy-container.log')
 game_log_path = os.path.join(run_dir, 'legacy-game.log')
 checks = []
-
-
-def docker(*args):
-    return subprocess.run(['docker', *args], capture_output=True, text=True, encoding='utf-8', errors='replace')
 
 
 def finish(status, **fields):
@@ -131,10 +130,13 @@ write(os.path.join(data, 'Instance', 'SpaceEngineers-Dedicated.cfg'), f'''<?xml 
 ''')
 
 token_args, token_env = githubtoken.for_container()
-subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS, *token_args,
-                '-v', 'plugincheck-ds-legacy:/ds', '-v', f'{volume}:/data', '-v', f'{data}:/seed:ro',
-                '-v', f'{os.path.join(base, "source")}:/plugin:ro', IMAGE],
-               check=True, stdout=subprocess.DEVNULL, env=token_env)
+problem = start_server(container, [*pin.args(), '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS, *token_args,
+                                   '-v', 'plugincheck-ds-legacy:/ds', '-v', f'{volume}:/data', IMAGE],
+                       base, {data: '/seed', os.path.join(base, 'source'): '/plugin'}, token_env)
+if problem:
+    docker('rm', '-f', '-v', container)
+    docker('volume', 'rm', volume)
+    finish('not run', reason=f'the server did not start: {problem}')
 
 
 def read(path):
@@ -145,11 +147,13 @@ def read(path):
 
 
 def game_ready():
-    return docker('exec', container, 'bash', '-c', f'grep -lq "{READY}" /data/Instance/*.log').returncode == 0
+    return docker('exec', container, 'bash', '-c', f'grep -lq "{READY}" /data/Instance/*.log', timeout=LOOK_SECONDS).returncode == 0
 
 
 def running():
-    return docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() == 'true'
+    looked = docker('inspect', '-f', '{{.State.Running}}', container, timeout=LOOK_SECONDS)
+    # A look that got no answer is not a server that ended.
+    return looked.returncode == TIMED_OUT or looked.stdout.strip() == 'true'
 
 
 start, state = time.time(), 'timeout'
@@ -165,13 +169,13 @@ while time.time() - start < TIMEOUT:
 
 elapsed = int(time.time() - start)
 # Stop first, so the logs run to the end of the test and not just to the moment the wait began.
-docker('stop', '-t', '60', container)
+docker('stop', '-t', '60', container, timeout=STOP_SECONDS)
 output = docker('logs', container)
 open(log_path, 'w', encoding='utf-8').write(output.stdout + output.stderr)
-docker('cp', f'{container}:/data/Magnetar/info.log', os.path.join(run_dir, 'legacy-info.log'))
 # The game's own log is where a plugin's later lines land. docker cp cannot pick files by pattern, so take the folder.
 instance = os.path.join(base, 'instance')
-docker('cp', f'{container}:/data/Instance/.', instance)
+for why in filter(None, (copy(f'{container}:/data/Magnetar/info.log', os.path.join(run_dir, 'legacy-info.log')), copy(f'{container}:/data/Instance/.', instance))):
+    print(why)
 game_text = ''.join(read(f) for f in sorted(glob.glob(os.path.join(instance, '*.log'))))
 if game_text:
     open(game_log_path, 'w', encoding='utf-8').write(game_text)

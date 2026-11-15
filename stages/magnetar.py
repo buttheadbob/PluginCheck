@@ -5,15 +5,17 @@ usage: magnetar.py <target.json> <run dir> [results.json]
 The plugin is registered as a dev folder set to a Release build. Only the manifest and its source directories are copied
 in, so a file that the loader would not see cannot hide a failure. The dedicated server lives in the
 plugincheck-ds-magnetar volume, which Torch and Legacy never touch, so an update or layout change here cannot affect them. Run data
-stays on a Docker volume, as on a real server. Mounted Windows folders only hand files in, and logs are copied out.
+stays on a Docker volume, as on a real server. Files are copied in before the server starts and logs copied out, so the server holds no
+folder of this computer (containers.py), and every docker call has a time limit.
 """
 import json, os, re, shutil, subprocess, sys, time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import githubtoken, repocopy, startlog
+import containers, githubtoken, repocopy, startlog
 import pin
+from containers import LOOK_SECONDS, STOP_SECONDS, copy, docker, docker_long, start_server
 
 IMAGE = 'ghcr.io/cometworks/magnetar:latest'
 TIMEOUT = 45 * 60
@@ -41,8 +43,7 @@ checks = []
 
 def game_build():
     """A hash of the game's main assembly. Magnetar's core plugins are compiled against it, so a cache only holds for one build."""
-    found = subprocess.run(['docker', 'run', *pin.args(), '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', IMAGE, '/ds/DedicatedServer64/Sandbox.Game.dll'],
-                           capture_output=True, text=True).stdout.split()
+    found = docker_long('run', *pin.args(), '--rm', '-v', 'plugincheck-ds-magnetar:/ds:ro', '--entrypoint', 'sha256sum', IMAGE, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
     return found[0][:16] if found else None
 
 
@@ -146,26 +147,34 @@ def seed_world():
 
 
 def info_log():
-    return subprocess.run(['docker', 'exec', container, 'bash', '-c', 'cat /data/Magnetar/info.log 2>/dev/null'],
-                          capture_output=True, text=True, encoding='utf-8', errors='replace').stdout
+    return docker('exec', container, 'bash', '-c', 'cat /data/Magnetar/info.log 2>/dev/null', timeout=LOOK_SECONDS).stdout
 
 
 def running():
-    r = subprocess.run(['docker', 'inspect', '-f', '{{.State.Running}}', container], capture_output=True, text=True)
-    return r.stdout.strip() == 'true'
+    r = docker('inspect', '-f', '{{.State.Running}}', container, timeout=LOOK_SECONDS)
+    # A look that got no answer is not a server that ended.
+    return r.returncode == containers.TIMED_OUT or r.stdout.strip() == 'true'
 
 
 seed()
 seed_world()
 restore_downloads()
 token_args, token_env = githubtoken.for_container()
-subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--user', '0:0', '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *token_args,
-                '-e', 'DS_DIR=/ds', '-e', f'SERVER_NAME=PluginCheck {name}',
-                '-v', 'plugincheck-ds-magnetar:/ds',
-                '-v', f'{volume}:/data', '-v', f'{data}:/seed:ro',
-                '-v', f'{os.path.join(run_dir, "source")}:/plugin:ro',
-                IMAGE, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'], check=True, stdout=subprocess.DEVNULL, env=token_env)
+problem = start_server(container, [*pin.args(), '--user', '0:0', '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *token_args,
+                                   '-e', 'DS_DIR=/ds', '-e', f'SERVER_NAME=PluginCheck {name}',
+                                   '-v', 'plugincheck-ds-magnetar:/ds', '-v', f'{volume}:/data',
+                                   IMAGE, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
+                       run_dir, {data: '/seed', os.path.join(run_dir, 'source'): '/plugin'}, token_env)
+if problem:
+    docker('rm', '-f', '-v', container)
+    docker('volume', 'rm', volume)
+    reason = f'the server did not start: {problem}'
+    print('not run', reason)
+    if result_path:
+        json.dump({'status': 'not run', 'reason': reason}, open(result_path, 'w', encoding='utf-8'), indent=1)
+    sys.exit(0)
 logs = open(log_path, 'wb')
+# Ended at the stop below, and never waited on for longer than 30 seconds.
 follower = subprocess.Popen(['docker', 'logs', '-f', container], stdout=logs, stderr=subprocess.STDOUT)
 
 start, state = time.time(), 'timeout'
@@ -183,14 +192,17 @@ while time.time() - start < TIMEOUT:
     time.sleep(10)
 
 elapsed = int(time.time() - start)
-subprocess.run(['docker', 'stop', '-t', '60', container], capture_output=True)
-follower.wait(timeout=30)
+docker('stop', '-t', '60', container, timeout=STOP_SECONDS)
+try:
+    follower.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    follower.kill()
 logs.close()
 # The regcheck stage reads the plugin the loader built, and logcheck reads the server's logs.
-subprocess.run(['docker', 'cp', f'{container}:/data/Magnetar/.', config], capture_output=True)
-subprocess.run(['docker', 'cp', f'{container}:/data/Instance/.', os.path.join(data, 'Instance')], capture_output=True)
-subprocess.run(['docker', 'rm', '-v', container], capture_output=True)
-subprocess.run(['docker', 'volume', 'rm', volume], capture_output=True)
+for why in filter(None, (copy(f'{container}:/data/Magnetar/.', config), copy(f'{container}:/data/Instance/.', os.path.join(data, 'Instance')))):
+    print(why)
+docker('rm', '-f', '-v', container)
+docker('volume', 'rm', volume)
 keep_downloads()
 # Read the copy: a container that has exited cannot be asked, and that is when the log matters most.
 copied = os.path.join(config, 'info.log')

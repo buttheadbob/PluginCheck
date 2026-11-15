@@ -36,7 +36,7 @@ class LiftedServe(unittest.TestCase):
     def serve(self, host, answers, record_after=None, stall=600, start_timeout=20, kill_fails=False):
         """answers: what each Docker check prints, in turn, or a function giving it. record_after: the check finds the record from then on."""
         tree = ast.parse(open(SOURCE, encoding='utf-8').read())
-        wanted = {'serve', 'write', 'read_text', 'container_log', 'copy'}
+        wanted = {'serve', 'write', 'read_text', 'container_log'}
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
         work = replay.folder()
         calls, ended, written = [], [], []
@@ -72,7 +72,9 @@ class LiftedServe(unittest.TestCase):
                      'CHECK_SECONDS': 1, 'startlog': startlog, 'remember_magnetar_cache': lambda folder: None,
                      'seed_magnetar': lambda *a: None, 'seed_torch': lambda *a: None, 'start_magnetar': start, 'start_legacy': start,
                      'start_torch': start, 'contextlib': __import__('contextlib'), 'watched': {}, 'watched_lock': threading.Lock(), 'TIMED_OUT': 124,
-                     'LOOK_SECONDS': 30, 'CLEAN_SECONDS': 30, 'COPY_SECONDS': 120, 'COPY_TRIES': 2}
+                     'LOOK_SECONDS': 30, 'CLEAN_SECONDS': 30}
+        # containers.copy, with this docker: once, and a reason when it fails.
+        namespace['copy'] = lambda *args, archive=None: None if docker('cp', *args).returncode == 0 else f"docker cp {' '.join(args)} failed"
         exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), namespace)
         save = os.path.join(work, 'save')
         os.makedirs(save)

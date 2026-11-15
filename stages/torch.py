@@ -2,17 +2,19 @@
 
 usage: torch.py <target.json> <run dir> [results.json]
 
-Set up as a real server is: the zip is copied into Torch's own Plugins folder, and run data stays on a Docker volume. Mounted
-Windows folders only hand files in. Runs in its own container with its own dedicated server in the plugincheck-ds-torch volume. Torch logs a line for every
+Set up as a real server is: the zip is copied into Torch's own Plugins folder, and run data stays on a Docker volume. Its files are copied
+in before it starts, so it holds no folder of this computer (containers.py), and every docker call has a time limit. Runs in its own
+container with its own dedicated server in the plugincheck-ds-torch volume. Torch logs a line for every
 command it registers, so this lists exactly which commands exist. Proton is not Windows: a failure here is a lead, to
 confirm on real Torch before reporting it as a plugin defect.
 
 The zip comes from the plugin's own Windows build, since .NET Framework plugins cannot be built in a Linux container.
 """
-import glob, json, os, re, shutil, subprocess, sys, time
+import glob, json, os, re, shutil, sys, time
 from xml.sax.saxutils import escape
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
 import pin
+from containers import LOOK_SECONDS, STOP_SECONDS, TIMED_OUT, copy, docker, start_server
 
 IMAGE = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
 TIMEOUT = 40 * 60
@@ -33,10 +35,6 @@ data = os.path.join(run_dir, 'torch-data')
 plugins = os.path.join(run_dir, 'torch-plugins')
 container = f'plugincheck-torch-{int(time.time())}'
 volume = container + '-data'
-
-
-def docker(*args):
-    return subprocess.run(['docker', *args], capture_output=True, text=True, encoding='utf-8', errors='replace')
 
 
 def finish(status, **fields):
@@ -88,14 +86,17 @@ open(os.path.join(data, 'Instance', 'SpaceEngineers-Dedicated.cfg'), 'w', encodi
 </MyConfigDedicated>
 ''')
 
-subprocess.run(['docker', 'run', *pin.args(), '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS,
-                '-v', 'plugincheck-ds-torch:/ds', '-v', f'{volume}:/run-data',
-                '-v', f'{data}:/seed/data:ro', '-v', f'{plugins}:/seed/plugins:ro', IMAGE],
-               check=True, stdout=subprocess.DEVNULL)
+problem = start_server(container, [*pin.args(), '--cpus', '6', '--memory', '12g', '--add-host', NO_CRASH_REPORTS,
+                                   '-v', 'plugincheck-ds-torch:/ds', '-v', f'{volume}:/run-data', IMAGE],
+                       run_dir, {data: '/seed/data', plugins: '/seed/plugins'})
+if problem:
+    docker('rm', '-f', '-v', container)
+    docker('volume', 'rm', volume)
+    finish('not run', reason=f'the server did not start: {problem}')
 
 
 def torch_log():
-    return docker('exec', container, 'bash', '-c', 'cat /run-data/Logs/Torch-*.log 2>/dev/null').stdout
+    return docker('exec', container, 'bash', '-c', 'cat /run-data/Logs/Torch-*.log 2>/dev/null', timeout=LOOK_SECONDS).stdout
 
 
 start, state = time.time(), 'timeout'
@@ -109,7 +110,9 @@ while time.time() - start < TIMEOUT:
         time.sleep(5)
         state = 'fatal'
         break
-    if docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
+    looked = docker('inspect', '-f', '{{.State.Running}}', container, timeout=LOOK_SECONDS)
+    # A look that got no answer is not a server that ended.
+    if looked.returncode != TIMED_OUT and looked.stdout.strip() != 'true':
         state = 'exited'
         break
     time.sleep(10)
@@ -117,8 +120,10 @@ while time.time() - start < TIMEOUT:
 output = docker('logs', container)
 open(os.path.join(run_dir, 'torch-container.log'), 'w', encoding='utf-8').write(output.stdout + output.stderr)
 text = torch_log()
-docker('stop', '-t', '60', container)
-docker('cp', f'{container}:/run-data/Logs', os.path.join(run_dir, 'torch-logs'))
+docker('stop', '-t', '60', container, timeout=STOP_SECONDS)
+lost = copy(f'{container}:/run-data/Logs', os.path.join(run_dir, 'torch-logs'))
+if lost:
+    print(lost)
 for dump in glob.glob(os.path.join(run_dir, 'torch-logs', '*.dmp')):
     os.remove(dump)
 docker('rm', '-f', '-v', container)

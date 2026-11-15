@@ -373,9 +373,6 @@ class CheckInterruptTests(unittest.TestCase):
         shutil.copytree(os.path.join(ROOT, 'stages'), os.path.join(root, 'stages'), ignore=shutil.ignore_patterns('__pycache__', 'bin', 'obj'))
         with open(os.path.join(root, 'stages', 'manifest.py'), 'w', encoding='utf-8') as f:
             f.write(FAKE_STAGE)
-        # This copy lives in a temporary folder, deeper than Docker Desktop's mounts allow, and starts no container.
-        with open(os.path.join(root, 'stages', 'mountdepth.py'), 'w', encoding='utf-8') as f:
-            f.write('def problem(run_dir):\n    return None\n')
         repo = os.path.join(folder, 'plugin')
         os.makedirs(repo)
         with open(os.path.join(root, 'targets', 'Fake.json'), 'w', encoding='utf-8') as f:

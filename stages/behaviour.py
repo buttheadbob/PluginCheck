@@ -31,15 +31,16 @@ In the pre-container lane (check.py --pre, README), PLUGINCHECK_BEHAVIOUR_DISCOV
 the scenarios are made, on the one slot PLUGINCHECK_CPUSET names, without acting as the owner of any slot. check.py --continue then runs it
 in full, and finds those discoveries in the results cache.
 """
-import atexit, concurrent.futures, contextlib, glob, hashlib, io, itertools, json, os, queue, re, shutil, signal, subprocess, sys, tarfile, threading, time, urllib.request, zipfile
+import atexit, concurrent.futures, contextlib, glob, hashlib, io, itertools, json, os, queue, re, shutil, signal, sys, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
-import classification, extraplugins, fixture, githubtoken, leases, repocopy, serverhash, startlog, timing as server_timing
+import classification, containers, extraplugins, fixture, githubtoken, leases, repocopy, serverhash, startlog, timing as server_timing
 import pin
+from containers import BUILD_SECONDS, TIMED_OUT, copy, start_server
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -74,15 +75,10 @@ SERVER_NAME = re.compile(r'plugincheck-behaviour-(\d+)-\d+(?:-data)?')
 ending = threading.Event()
 # The clean-up repeats its removal for up to this long, until two listings in a row find none of this stage's servers (remove_own_servers).
 END_SECONDS = 10
-# Every docker call has a time limit. When Docker Desktop's file sharing stalls, a call can wait for good, and the stage with it. A call that
-# runs out gives TIMED_OUT and says so on stderr (docker). A copy into or out of a server is tried COPY_TRIES times (copy), a look inside one
-# (docker exec) gets LOOK_SECONDS, removing servers at the end CLEAN_SECONDS, and a build in a container BUILD_SECONDS.
-DOCKER_SECONDS = 120
-TIMED_OUT = 124
-COPY_SECONDS, COPY_TRIES = 120, 2
+# Every docker call has a time limit (containers.py). A look inside a server (docker exec) gets LOOK_SECONDS, and removing servers at the end
+# CLEAN_SECONDS.
 LOOK_SECONDS = 30
 CLEAN_SECONDS = 30
-BUILD_SECONDS = 30 * 60
 # The stall watchdog (watch_servers) looks at each server once every WATCH_SECONDS. It stops the run when a server is older than AGE_LIMIT,
 # which serve() never lets one reach, or when the same process of a server waits on a file share (STALLED_WAIT) at two looks in a row.
 WATCH_SECONDS = 45
@@ -109,32 +105,14 @@ magnetar_cache = None
 options = target.get('behaviour', {})
 
 
-def docker(*args, timeout=DOCKER_SECONDS, stdin=None, env=None):
-    try:
-        return subprocess.run(['docker', *args], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout, stdin=stdin, env=env)
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(['docker', *args], TIMED_OUT, '', f'docker {args[0]} gave no answer in {timeout}s')
+def docker(*args, **given):
+    """containers.docker, named here so a replay of this stage replaces it (tests/replay.py)."""
+    return containers.docker(*args, **given)
 
 
 def docker_long(*args):
     """docker for a call that can take minutes: a build in a container, or a run whose image may have to be pulled first."""
     return docker(*args, timeout=BUILD_SECONDS)
-
-
-def copy(*args, archive=None):
-    """docker cp, tried COPY_TRIES times with COPY_SECONDS each, from the tar file archive on stdin when given. Returns None, or why it
-    failed. A path or container that does not exist is an answer, so it is not tried again."""
-    for attempt in range(COPY_TRIES):
-        with open(archive, 'rb') if archive else contextlib.nullcontext() as given:
-            done = docker('cp', *args, timeout=COPY_SECONDS, stdin=given)
-        if done.returncode == 0:
-            return None
-        why = done.stderr.strip()[-300:] or f'exit code {done.returncode}'
-        if 'Could not find the file' in why or 'No such container' in why:
-            break
-        if attempt + 1 < COPY_TRIES:
-            time.sleep(2)
-    return f"docker cp {' '.join(a for a in args if a != '-')} failed: {why}"
 
 
 def finish(status, **fields):
@@ -461,54 +439,6 @@ def seed_magnetar(build, seed, folder):
     # Files a variant writes before start, such as an older config of the plugin under test.
     for relative, text in build.get('files', {}).items():
         write(os.path.join(seed, relative), text)
-
-
-def readable(info):
-    """A file handed in as the read-only mounts gave it before: owned by root, as docker cp makes it anyway, readable by everyone and
-    writable by root alone. Torch and Legacy run as the user server, and only read these."""
-    info.uid = info.gid = 0
-    info.uname = info.gname = 'root'
-    info.mode = 0o755 if info.isdir() else 0o644
-    return info
-
-
-def hand_in(container, folder, files):
-    """Copies a server's files into its created container, as one tar through docker cp: files maps a folder here to a path in the
-    container. The folders above each path are in the tar too, so the copy needs nothing of the image. Returns None, or why it failed."""
-    archive = os.path.join(folder, 'hand-in.tar')
-    began = time.time()
-    try:
-        with tarfile.open(archive, 'w') as tar:
-            above = sorted({'/'.join(p[:i]) for p in (inside.strip('/').split('/') for inside in files.values()) for i in range(1, len(p))})
-            for name in above:
-                info = tarfile.TarInfo(name)
-                info.type = tarfile.DIRTYPE
-                tar.addfile(readable(info))
-            for source, inside in files.items():
-                tar.add(source, arcname=inside.strip('/'), filter=readable)
-        built, size = time.time(), os.path.getsize(archive)
-        why = copy('-', f'{container}:/', archive=archive)
-        # Measuring only, for what a server's start costs (README, Behaviour).
-        print(f'  hand-in {container}: {size / 2 ** 20:.1f} MB, tar {built - began:.1f}s, docker cp {time.time() - built:.1f}s', flush=True)
-        return why
-    finally:
-        # Also when the tar could not be built or sent: none is left behind in the folder.
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(archive)
-
-
-def start_server(container, create, folder, files, env=None):
-    """docker create, the server's files copied in (hand_in), then docker start. A running server holds no folder of this computer: when
-    Docker Desktop's file sharing stalled, servers that did waited on it for good, and could not be removed. Returns None, or why the server
-    did not start."""
-    made = docker('create', '--name', container, *create, env=env)
-    if made.returncode:
-        return f'docker create failed: {made.stderr.strip()[-300:]}'
-    why = hand_in(container, folder, files)
-    if why:
-        return f'its files could not be copied in: {why}'
-    started = docker('start', container)
-    return f'docker start failed: {started.stderr.strip()[-300:]}' if started.returncode else None
 
 
 def start_magnetar(build, seed, folder, container, volume, cores, node=False):

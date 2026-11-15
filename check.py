@@ -9,7 +9,7 @@ import argparse, atexit, contextlib, datetime, glob, hashlib, json, os, shutil, 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'stages'))
 from display import Display, STALLED, STATUS_MARK, clock, stalled
-import classification, githubtoken, leases, mountdepth, prerun
+import classification, githubtoken, leases, prerun
 import pin
 
 STAGES = {
@@ -101,10 +101,6 @@ if args.resume:
         sys.exit(f'{run_dir} is not a run folder.')
 else:
     run_dir = os.path.join(HERE, 'runs', target['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-# A folder too deep for Docker Desktop's mounts makes every Legacy and Torch server exit at start (stages/mountdepth.py).
-too_deep = mountdepth.problem(run_dir)
-if too_deep:
-    sys.exit(too_deep)
 if not args.resume:
     os.makedirs(run_dir)
 target_file = os.path.join(run_dir, 'target.json')

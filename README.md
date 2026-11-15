@@ -197,7 +197,7 @@ Each server's result is kept in `cache/behaviour`. It's found again by:
 - the Docker image its host runs from;
 - the scenario file the probe got;
 - the target's world options;
-- the code that shapes a server: what `stages/behaviour/serverhash.py` finds in `behaviour.py` from the server and its inputs, plus the fixture, the probes and the helpers that build them.
+- the code that shapes a server: what `stages/behaviour/serverhash.py` finds in `behaviour.py` from the server and its inputs, plus `stages/containers.py` (which makes, fills and starts every server), the fixture, the probes and the helpers that build them.
 
 Changing how servers are planned, ordered or compared keeps every saved result. `tests/test_cache_keys.py` checks which code counts.
 
@@ -385,9 +385,15 @@ library hits internal asserts under Legacy and would upload a crash dump for eac
 reports.
 
 Tests are set up as a real server is: a Torch plugin's zip goes into Torch's own `Plugins` folder, and a loader compiles from
-its dev folder. Run data lives on Docker volumes. Mounted Windows folders only hand files in, partly because .NET under Wine,
-which Proton is built on, cannot load larger DLLs from them, and logs are copied out at the end. Behaviour servers, which run many at a
-time, get even their handed-in files by `docker cp` instead of a mount (see Behaviour).
+its dev folder. Run data lives on Docker volumes, partly because .NET under Wine, which Proton is built on, cannot load larger DLLs
+from a mounted Windows folder. No server holds a folder of this computer: every server, in the behaviour stage and in the magnetar,
+legacy, torch, quasar and quasar_managed stages, is made with `docker create`, gets its files by `docker cp` as one tar, and then starts
+(`stages/containers.py`). Its logs are copied out the same way at the end. Every docker call these six stages make has a time limit (the
+other stages' docker calls, short builds and checks, and check.py's own have none), and a server that could not get its files ends with
+that reason. Quasar's two versions share one Docker volume for their data, removed at the end, also when the stage is interrupted. Folders of this
+computer are still mounted only into short build runs of the .NET SDK image and lint's Quasar build, which run as root, so Docker
+Desktop's limit on how deep a folder mounted into a container that runs as a user may be no longer applies, and PluginCheck no longer
+checks its own folder's depth.
 
 Our images are kept lean, and each removal was tested by loading a real server. They run as the `server` user, hold no setuid
 programs, and contain no download tools, since each download happens in a build stage that is thrown away. Log files are copied
