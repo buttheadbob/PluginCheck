@@ -4,7 +4,9 @@ usage: quasar_managed.py <target.json> <run dir> [results.json]
 
 Separate from the magnetar stage on purpose: a Quasar-managed server gets Quasar.Agent and companions, which can change
 how Magnetar behaves, and not every server runs under Quasar. It shares nothing with the other stages: the runtime Quasar
-downloads lives in plugincheck-ds-quasar, and all other state in a volume deleted after the run.
+downloads lives in plugincheck-ds-quasar, and all other state in a volume deleted after the run. The seed, the plugin's source and the
+Magnetar libraries are copied into each container before it starts, so no server holds a folder of this computer (containers.py), and
+every docker call has a time limit.
 
 Steps, in the order a real install takes them:
   1. 1.4.1 writes the migration receipt. See quasar.py for why release.json is corrected for this step.
@@ -18,7 +20,7 @@ on the server's Plugins page, so an admin depends on this path as much as on any
 Servers, profiles and dev folders are seeded as the JSON files Quasar reads, since creating them is otherwise UI only.
 The admin Steam ID is a placeholder that is never signed in with.
 """
-import json, os, re, shutil, subprocess, sys, time
+import json, os, re, shutil, sys, time
 import xml.etree.ElementTree as ET
 
 BRIDGE, LATEST = '1.4.1.1', 'latest'
@@ -30,7 +32,10 @@ TIMEOUT = 30 * 60
 HOLD = os.environ.get('PLUGINCHECK_HOLD') == '1'
 WORLD = os.environ.get('PLUGINCHECK_WORLD')
 UI_PORT = 18080
-SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
+import pin
+from containers import LOOK_SECONDS, STOP_SECONDS, TIMED_OUT, copy, docker, docker_long, start_server
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -44,15 +49,12 @@ work = os.path.join(run_dir, 'managed')
 source = os.path.join(work, 'plugins', name)
 seed = os.path.join(work, 'seed')
 os.makedirs(os.path.join(work, 'plugins'))
-shutil.copytree(repo, source, ignore=SKIP)
+shutil.copytree(repo, source, ignore=repocopy.ignore(repo))
 package = json.load(open(os.path.join(source, conf['packageManifest']), encoding='utf-8')) if conf else {}
 companions = [c for c in package.get('companionPlugins', []) if isinstance(c, dict)]
-manifest = target['magnetar']['manifest']
-plugin_id = ET.parse(os.path.join(repo, manifest)).getroot().findtext('Id').strip()
-
-
-def docker(*args):
-    return subprocess.run(['docker', *args], capture_output=True, text=True, encoding='utf-8', errors='replace')
+# A Quasar UI plugin with no Magnetar plugin of its own has its game side in its owned companions, which Quasar deploys itself.
+manifest = target['magnetar']['manifest'] if 'magnetar' in target else None
+plugin_id = ET.parse(os.path.join(repo, manifest)).getroot().findtext('Id').strip() if manifest else None
 
 
 def finish(status, **fields):
@@ -70,19 +72,23 @@ def write(path, value):
         json.dump(value, f, indent=1)
 
 
-def start(label, image, script, extra=()):
+def start(label, image, script, extra=(), files=None, replace=()):
+    """A container on this run's volume, with the plugin's source and any other files copied in before it starts."""
     container = f'plugincheck-quasarmanaged-{label}-{stamp}'
-    subprocess.run(['docker', 'run', '-d', '--name', container, '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *extra,
-                    '-e', f'QUASAR_ADMIN_STEAM_ID={TEST_ADMIN}',
-                    '-e', 'QUASAR_HOST_ID=plugincheck', '-e', 'QUASAR_LOG_MIN_LEVEL=Info',
-                    '-v', f'{volume}:/data', '-v', f'plugincheck-ds-quasar:{DS}',
-                    '-v', f'{os.path.join(work, "plugins")}:/plugins',
-                    image, '-c', script], check=True, stdout=subprocess.DEVNULL)
+    problem = start_server(container, [*pin.args(), '--cpus', '6', '--memory', '12g', '--entrypoint', 'bash', *extra,
+                                       '-e', f'QUASAR_ADMIN_STEAM_ID={TEST_ADMIN}',
+                                       '-e', 'QUASAR_HOST_ID=plugincheck', '-e', 'QUASAR_LOG_MIN_LEVEL=Info',
+                                       '-v', f'{volume}:/data', '-v', f'plugincheck-ds-quasar:{DS}',
+                                       image, '-c', script],
+                           work, {os.path.join(work, 'plugins'): '/plugins', **(files or {})}, replace=replace)
+    if problem:
+        docker('rm', '-f', '-v', container)
+        finish('not run', reason=f'the {label} container did not start: {problem}')
     return container
 
 
 def run(container, script):
-    return docker('exec', container, 'bash', '-c', script)
+    return docker('exec', container, 'bash', '-c', script, timeout=LOOK_SECONDS)
 
 
 def health(container):
@@ -90,13 +96,15 @@ def health(container):
 
 
 def alive(container):
-    return docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() == 'true'
+    looked = docker('inspect', '-f', '{{.State.Running}}', container, timeout=LOOK_SECONDS)
+    # A look that got no answer is not a server that ended.
+    return looked.returncode == TIMED_OUT or looked.stdout.strip() == 'true'
 
 
 def stop(container, label):
     logs = docker('logs', container)
     open(os.path.join(run_dir, f'quasar-managed-{label}.log'), 'w', encoding='utf-8').write(logs.stdout + logs.stderr)
-    docker('stop', '-t', '60', container)
+    docker('stop', '-t', '60', container, timeout=STOP_SECONDS)
     docker('rm', '-f', '-v', container)
 
 
@@ -113,11 +121,11 @@ def wait(container, ready, seconds=TIMEOUT):
 
 # Seed the files the Quasar UI would write.
 write(os.path.join(seed, 'dev-folders.json'), [{
-    'name': name, 'folderPath': f'/plugins/{name}', 'dataFile': manifest, 'pluginId': plugin_id, 'debugBuild': False}])
+    'name': name, 'folderPath': f'/plugins/{name}', 'dataFile': manifest, 'pluginId': plugin_id, 'debugBuild': False}] if manifest else [])
 write(os.path.join(seed, 'ConfigProfiles', SERVER, 'profile.json'), {
     'configProfileId': SERVER, 'name': 'PluginCheck',
     'sessionSettings': {'onlineMode': 1},
-    'plugins': [{'pluginId': plugin_id, 'displayName': name}], 'mods': [], 'offeredDefaultPlugins': []})
+    'plugins': [{'pluginId': plugin_id, 'displayName': name}] if plugin_id else [], 'mods': [], 'offeredDefaultPlugins': []})
 write(os.path.join(seed, 'Magnetars', SERVER, 'server.json'), {
     'uniqueName': SERVER, 'displayName': 'PluginCheck', 'inGameServerName': f'PluginCheck {name}', 'inGameWorldName': 'PluginCheck',
     'goalState': 1, 'autoStart': True, 'configProfileId': SERVER, 'worldSaveName': 'World', 'worldTemplateId': '', 'serverPort': 27016})
@@ -125,18 +133,15 @@ if WORLD:
     shutil.copytree(WORLD, os.path.join(seed, 'Magnetars', SERVER, 'DedicatedServer', 'Saves', 'World'))
 docker('volume', 'create', 'plugincheck-ds-quasar')
 docker('volume', 'create', volume)
-copied = docker('run', '--rm', '--entrypoint', 'bash', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
-                f'ghcr.io/cometworks/quasar:{LATEST}', '-c', 'cp -r /seed/. /data/')
-if copied.returncode:
-    finish('not run', reason='could not seed the data volume: ' + copied.stderr[:300])
 
-# 1. The migration receipt.
+# 1. The migration receipt. The first container on the volume also lays the seed into it.
 image = f'ghcr.io/cometworks/quasar:{BRIDGE}'
-docker('pull', image)
-packaged = json.loads(docker('run', '--rm', '--entrypoint', 'cat', image, '/opt/quasar/release.json').stdout)
+docker_long('pull', image)
+packaged = json.loads(docker('run', *pin.args(), '--rm', '--entrypoint', 'cat', image, '/opt/quasar/release.json').stdout)
 fixed = os.path.join(work, 'release.json')
 json.dump({**packaged, 'version': BRIDGE}, open(fixed, 'w', encoding='utf-8'))
-container = start('receipt', image, 'exec /opt/quasar/Quasar', ('-e', 'QUASAR_PRESERVE_SERVERS_ON_SHUTDOWN=false', '-v', f'{fixed}:/opt/quasar/release.json:ro'))
+container = start('receipt', image, 'cp -r /seed/. /data/ && exec /opt/quasar/Quasar', ('-e', 'QUASAR_PRESERVE_SERVERS_ON_SHUTDOWN=false'),
+                  files={seed: '/seed'}, replace=[(fixed, '/opt/quasar/release.json')])
 wrote = wait(container, lambda: run(container, 'test -f /data/Updates/migration-1.4.1.json').returncode == 0, 300)
 stop(container, 'receipt')
 if not wrote:
@@ -145,7 +150,7 @@ if not wrote:
 # 2. The managed runtime. Only the first run downloads it.
 latest = f'ghcr.io/cometworks/quasar:{LATEST}'
 exe = f'{DS}/DedicatedServer64/Sandbox.Game.dll'
-if docker('run', '--rm', '--entrypoint', 'test', '-v', f'plugincheck-ds-quasar:{DS}', latest, '-f', exe).returncode:
+if docker_long('run', *pin.args(), '--rm', '--entrypoint', 'test', '-v', f'plugincheck-ds-quasar:{DS}', latest, '-f', exe).returncode:
     print('Installing the managed runtime, which only the first run does', flush=True)
     container = start('install', latest, 'exec /opt/quasar/Quasar')
     installed = wait(container, lambda: run(container, f'test -f {exe}').returncode == 0)
@@ -160,13 +165,25 @@ copy_world = '' if WORLD else f'cp -r "{DS}/Content/CustomWorlds/Star System/." 
 build = [f'set -e; mkdir -p "{world}"; {copy_world}cd "/plugins/{name}"']
 if package:
     build.append(f'dotnet build "{package["projectPath"]}" -c Release -v:minimal -p:QuasarPluginAbstractionsAssembly=/opt/quasar/Quasar.Plugin.Abstractions.dll -p:DeployToQuasar=false')
+# As Quasar's own installer does (QuasarUiPluginHubCatalogService.cs:580-605): the protocol, DS64, and a Magnetar for PluginSdk.
+# Quasar installs its managed Magnetar into this run's fresh volume only when the server starts, after this build, so the
+# official Magnetar image's libraries stand in for it.
+magnetar_sdk = os.path.join(work, 'magnetar')
+if companions:
+    os.makedirs(magnetar_sdk, exist_ok=True)
+    holder = f'plugincheck-managed-sdk-{os.getpid()}'
+    docker_long('create', '--name', holder, 'ghcr.io/cometworks/magnetar:latest')
+    lost = copy(f'{holder}:/opt/magnetar/Libraries', magnetar_sdk)
+    docker('rm', '-v', holder)
+    if lost:
+        finish('not run', reason=f'could not copy the Magnetar libraries the companions build against: {lost}')
 for c in companions:
     build.append(f'dotnet build "{c["projectPath"]}" -c Release -v:minimal -o ".quasar/companions/{c["id"]}" -p:Platform=x64 '
-                 f'-p:CopyLocalLockFileAssemblies=true -p:MagnetarProtocolAssembly=/opt/quasar/Agent/Magnetar.Protocol.dll -p:DS64={DS}/DedicatedServer64')
+                 f'-p:CopyLocalLockFileAssemblies=true -p:MagnetarProtocolAssembly=/opt/quasar/Agent/Magnetar.Protocol.dll -p:DS64={DS}/DedicatedServer64 -p:Magnetar=/magnetar')
 build += ['echo PLUGINCHECK_BUILD_OK', 'cd /opt/quasar', 'exec /opt/quasar/Quasar']
 # The UI is published to this machine only. A local request counts as trusted, so no Steam sign-in is needed.
 ui = ('-p', f'127.0.0.1:{UI_PORT}:8080', '-e', f'QUASAR_PUBLIC_BASE_URL=http://127.0.0.1:{UI_PORT}', '-e', 'QUASAR_UI_PLUGIN_DIRS=/plugins')
-container = start('server', latest, '; '.join(build), ui)
+container = start('server', latest, '; '.join(build), ui, files={magnetar_sdk: '/magnetar'} if companions else None)
 
 
 def logs_text():
@@ -178,7 +195,8 @@ ready = wait(container, lambda: 'Game ready' in logs_text())
 time.sleep(15 if ready else 0)
 text = logs_text()
 open(os.path.join(run_dir, 'quasar-managed-server.log'), 'w', encoding='utf-8').write(text)
-quasar_built = 'PLUGINCHECK_BUILD_OK' in (docker('logs', container).stdout + docker('logs', container).stderr)
+said = docker('logs', container)
+quasar_built = 'PLUGINCHECK_BUILD_OK' in said.stdout + said.stderr
 if HOLD:
     # Left running with no time limit, since whoever is using it may not be back soon.
     print(f'Left running at http://127.0.0.1:{UI_PORT}. To remove it: docker rm -f {container} && docker volume rm {volume}', flush=True)

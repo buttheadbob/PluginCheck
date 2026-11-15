@@ -9,9 +9,11 @@ Clean means no advisory is published today. It does not mean a package is safe.
 import json, os, re, subprocess, sys
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import quoteattr
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin, repocopy
 
 SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
 run_dir = os.path.abspath(sys.argv[2])
@@ -39,7 +41,7 @@ def add(name, version, source):
     packages.setdefault((name, version), []).append(source)
 
 
-for folder, dirs, files in os.walk(repo):
+for folder, dirs, files in repocopy.walk(repo):
     dirs[:] = [d for d in dirs if d not in SKIP]
     for f in files:
         path = os.path.join(folder, f)
@@ -86,7 +88,7 @@ def audit():
 ''')
     command = ('rm -rf /work/obj; cd /work; dotnet restore -v q >/work/restore.log 2>&1 || exit 7; '
                'dotnet list package --vulnerable --include-transitive --format json')
-    return subprocess.run(['docker', 'run', '--rm', '--cpus', '4', '--memory', '4g', '-v', f'{work}:/work', '--entrypoint', 'bash', SDK, '-c', command],
+    return subprocess.run(['docker', 'run', *pin.args(), '--rm', '--cpus', '4', '--memory', '4g', '-v', f'{work}:/work', '--entrypoint', 'bash', SDK, '-c', command],
                           capture_output=True, text=True, encoding='utf-8', errors='replace')
 
 

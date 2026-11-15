@@ -36,4 +36,4 @@ tail -q -n +1 -F /data/Magnetar/info.log 2>/dev/null &
 (until compgen -G '/data/Instance/*.log' >/dev/null; do sleep 1; done; exec tail -q -n +1 -F /data/Instance/*.log) &
 
 cd /opt/magnetar
-exec /opt/proton/proton run MagnetarLegacy.exe -consent deny -config 'Z:\data\Magnetar' -ds64 'Z:\ds\DedicatedServer64' -path 'Z:\data\Instance' "$@"
+exec /opt/proton/proton run MagnetarLegacy.exe -config 'Z:\data\Magnetar' -ds64 'Z:\ds\DedicatedServer64' -path 'Z:\data\Instance' "$@"

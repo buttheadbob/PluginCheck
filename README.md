@@ -44,15 +44,22 @@ panel off with no warning. An AI running PluginCheck must do the same: [Agent.md
 `results.json` and the stage logs below.
 
 Results land in `runs/<target>/<timestamp>/`: `results.json`, updated after every stage, plus a log for each stage that can be followed live. Worlds and source copies are
-deleted afterwards. Add `--keep` to look at them.
+deleted afterwards. Add `--keep` to look at them. `PLUGINCHECK_RUNS_DIR` names another runs folder, such as the main checkout's for a copy
+whose runs should show beside the others. Every run gets a new folder: a timestamp whose folder is already there is never used again,
+and the next free second is taken instead (`stages/runfolders.py`).
 
 A target can give the `behaviour` stage a `behaviour` section, all of it optional:
 
 | Key | What it does |
 |---|---|
 | `legacy` | Also runs every scenario on MagnetarLegacy, under Proton |
+| `shipDrills` | Adds `stages/behaviour/drilling.py`: an asteroid with ship drills of each kind of owner cutting it, and a container in front of where a player caller stands |
+| `programmableBlocks` | Adds the blocks in `stages/behaviour/programmable.py` to the world: each on a static grid out in space with a battery, with scripts that run light, run slow, hold memory, fault, or turn themselves on, for players, NPCs and no one, inside and outside safe zones |
 | `settleSeconds` | How long to wait once the world is ready, 15 by default. For a plugin with a warm-up, which would otherwise refuse every command |
 | `removeDuring` | `commands` to run again while things leave the world, each alone on its server. `minSeconds` is the least each runs for. `remove` lists `after`, `kind` and `name`, where `kind` is `grid`, `block`, `identity`, `faction` or `player`. The player is a `MyPlayer` the probe adds under the server's own client, so this is a player leaving the session, not a real client disconnecting |
+| `plugins` | Other plugins a variant can load beside this one, each built from source at a pinned commit or tag. `stages/behaviour/extraplugins.py` has the format |
+| `variants` | More builds made from each working build: with `plugins` loaded and their `config`, with `files` written before start, or with an `overlay` folder laid over the source, each limited to its `scenarios` |
+| `leaveOut` | Builds to leave out of the run by name, such as a published build known to hang at start |
 
 Add `--hold` to leave the Quasar-managed server running at http://127.0.0.1:18080 with no time limit, to look around its
 UI. A local request counts as trusted, so no Steam sign-in is needed. The port is only open to this machine. The run
@@ -79,7 +86,9 @@ docker build --build-arg MAGNETAR_SHA256=<sha256> -t plugincheck-magnetar-legacy
 ```
 
 Each stage ends as `pass`, `fail`, `review` (a person or AI must read it), `not run`, `not present` or `unable to verify`.
-A stage that did not run is never a pass.
+A stage that did not run is never a pass. A behaviour stage stopped by its stall watchdog is `not run` with `stalled: true` in
+results.json; check.py shows it as `stopped: Docker stalled` in red, adds a `FAILED  behaviour stopped: Docker stalled` line under the
+summary, counts it as a failure on the live panel, and exits 1.
 
 **GitHub limit:** without a token GitHub allows 60 requests an hour. To raise that, put a token in `github-token.txt` beside `check.py`, which
 git ignores. Use a fine-grained token with read access to public repositories and nothing else, because a container that uses it also runs
@@ -100,6 +109,7 @@ plugin code. `PULSAR_GITHUB_TOKEN` works too.
 | `threads` | .NET SDK image | Lists game objects used off the game thread, following calls through the plugin, and every call to a game member that behaves differently by thread. Leads to read. Always `review`, because no leads proves nothing |
 | `commands` | .NET SDK image | Warns when player-level commands can show data about other players: game data, grids, or a plugin's own records. Some are intended, so it never fails |
 | `nulls` | .NET SDK image | Lists game values that can be null, used with no check first. Leads to read |
+| `storage` | .NET SDK image | Lists what fails on a cluster or a network mount: file calls on the game thread, with no catch on the way up as `UNGUARDED`, failed reads that carry on with defaults, per node files, and state kept by player or grid. Leads to read |
 | `hostpackages` | Host and images | The plugin ships nothing the game or its loader already provides |
 | `magnetar` | Official Magnetar image | The loader compiles the plugin from source and a world loads. If Magnetar itself cannot start, such as on GitHub's rate limit, it ends as `unable to verify` and says why |
 | `legacy` | Our Proton image | The same test on MagnetarLegacy and .NET Framework 4.8. Logs are copied after the server stops, and the game's own log lands in `legacy-game.log` |
@@ -147,10 +157,30 @@ Loading proves little: a plugin can change which grids it acts on, with every ot
 plugin does and records the result. It needs nothing written by a person, and runs by default with no limit on server starts.
 
 1. **Discovers:** a probe plugin loads beside the plugin and reads its commands and settings, on Magnetar and on Torch.
-2. **Generates:** one idle run, then every command, on its own and with each on/off setting its code can reach flipped. Required
-   arguments are filled in by type, and a command with optional on/off arguments also runs with them on.
+2. **Generates:** one idle run, then every command, on its own and with each on/off setting its code can reach flipped. The AI reading
+   the commands gives each one real example lines, and who runs them: the console, a player or an Admin. A command with no example has its
+   arguments filled in by type, which only reaches its first check, so it is listed as `NO EXAMPLE`.
 3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
-   probe has its record.
+   probe has its record. Its cores go back at the kill, and its logs are copied and its container removed while the next server starts.
+   Docker is asked every 5 seconds for the record, a Torch fatal error, or a server that ended. A server that writes no log line for 10
+   minutes, has no record and isn't compiling ends there as a timeout, with its last lines, instead of waiting out the 20 minutes. The run
+   goes on, and a scenario that itself waits longer in one go gets that long and a minute more.
+
+   No server holds a folder of this computer while it runs. Each one is made with `docker create`, its seed and plugin files are copied in
+   with `docker cp` as one tar (owned by root, readable by all, as the read-only mounts were before), and then it starts. A `hand-in` line
+   in `behaviour.log` gives each tar's size and the seconds spent building and copying it. What Magnetar downloaded (about 76 MB) is not in
+   each Magnetar server's tar: it is copied once into a Docker volume of the run, named by its content
+   (`plugincheck-behaviour-<pid>-seed-<hash>`), and mounted read-only into every Magnetar server, which copies it into its own data before
+   its seed. The volume is removed with the run's servers at the end, on an interrupt and on a stall stop, and by the start-up sweep if the
+   run that made it is gone. If it cannot be filled, each Magnetar server gets the cache in its own tar, as before. Its logs and record
+   are copied out the same way. When Docker Desktop's file sharing stalled, servers that kept mounted folders open waited on them for good,
+   could not be killed or removed, and piled up. Every docker call this stage makes has a time limit, and each copy in or out is tried
+   twice and gives its reason if it still fails. A server that could not get its files ends as `not started`, with that reason.
+
+   A watchdog looks at each running server about every 45 seconds. It stops the run, removing its servers as an interrupt does, and gives
+   the reason as the stage's result, when a server has run 5 minutes past the 20-minute limit, which a server that is not stuck never
+   reaches, or when the same process in one waits on a file share (state D in `request_wait_answer`) at two looks in a row. Each look is
+   one `docker exec` with a time limit, and the age needs no Docker at all.
 4. **Compares:** the published build against each working build, and the working builds against each other.
 
 Published builds come from the repositories listed on MagnetarHub and QuasarHub, and from torchapi.com, into `cache/behaviour`. A plugin
@@ -164,15 +194,35 @@ the same settings can share one. Writers go first, so the first command in each 
 command that changes something it does not declare, reruns alone before it is reported. The same reading says which settings each command can
 reach. With no current reading, every command gets its own server and every setting is flipped.
 
-Servers run side by side, as many as fit in Docker's cores and memory, each pinned to its own 2 logical cores. Measured on AutoStation, 16 servers
+Servers run side by side, as many as fit in Docker's cores and memory, each pinned to its own 2 logical cores, never the user's own (Lending slots to other sessions). Measured on AutoStation, 16 servers
 on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
+
+Each server's result is kept in `cache/behaviour`. It's found again by:
+- its build;
+- the game;
+- the Docker image its host runs from;
+- the scenario file the probe got;
+- the target's world options;
+- the code that shapes a server: what `stages/behaviour/serverhash.py` finds in `behaviour.py` from the server and its inputs, plus `stages/containers.py` (which makes, fills and starts every server), the fixture, the probes and the helpers that build them.
+
+Changing how servers are planned, ordered or compared keeps every saved result. `tests/test_cache_keys.py` checks which code counts.
 
 The world is generated by `stages/behaviour/fixture.py` from the game's own saves: grids of each size and kind of owner, subgrids on
 rotors, wheels, landing gear and connectors, and a moon for gravity. Every build runs at least twice, and a result that differs between runs of one build
 is marked `UNSTABLE`, with the builds it happened on, because it depends on timing. `PLUGINCHECK_REPEATS` sets how many runs each build gets.
 
 The probe records on the game thread, the only place the game gives the full answer. Results land in `behaviour.json`, with every
-record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+record in `behaviour-records.json`, and what every command said in `behaviour-replies.txt`. Each `DIFF` is a lead that two builds disagree, not a verdict on which is right.
+
+A finished server only proves that a server finished. Two builds that fail the same way agree, so a command that never ran fails the stage,
+and how far each command got has to be read from `behaviour-replies.txt`.
+
+Commands run as the console unless an example names a caller. A caller is a made-up online player with a character, because no real client can
+join a test server, and a second one, ProbeTarget, is there to be acted on. Replies are captured, since nothing could receive them. On Torch, a
+player's command skips `OnCommandExecuting`, so a plugin's own permission hook does not run. Settings that hold a list, such as auto commands
+and presets, start empty, so the commands that use them stop at "not found".
+
+The world has no programmable blocks unless a target asks for them, and on a world with them the probe also records each block's state, and what its script was doing in `behaviour-records.json`. An example can then say `settle` and `min`, the seconds before it runs and after, and `settings` of any type. Lines joined with ` && ` run on one server, and `probe:recompile <block name>` and `probe:save` do what a client or an autosave would. An example with `node` runs on Magnetar as a cluster node, set by the two variables PluginSdk reads, with a shared folder, and `probe:sharedwrite`, `probe:sharedread` and `probe:sharedremove` stand in for another node writing it. That is one node, not a cluster: no gateway, no handover and no second process. Blocks named `watch-*` are recorded with the names of what they hold. Example lines use a command's real case, because Torch's are case sensitive. `stages/classification.py` has the details.
 
 **What it cannot prove:**
 - **Correctness.** No difference only means the builds agree, and both may be wrong.
@@ -187,6 +237,159 @@ record in `behaviour-records.json`. Each `DIFF` is a lead that two builds disagr
 - **Settings that work together.** On/off settings flip one at a time, and other kinds of setting are not changed.
 - **Legacy.** Only Magnetar Interim and Torch run this stage.
 
+### Timing
+Every server prints one `timing` line in `behaviour.log` when its slot is freed. It gives the seconds from getting the slot until each point: the container is up, the game is ready, the record appears (or the server stops without one), it is killed, its slot is freed, and it is cleaned up. It also gives the wait for the slot before that, and the sim speed: game seconds per wall second while the probe ran, where 1 is full speed. The same numbers are in each record's `timing` field, and the probe's own numbers are in `probeTiming`. Game ready is worked out back from the record using the probe's own time span, so the container's clock doesn't have to match the host's. These numbers are for measuring only: no comparison reads them. A result kept for later runs is saved without them, so a reused result has no `timing` or `probeTiming`.
+
+## Lending slots to other sessions
+The behaviour stage runs its servers in slots of two logical cores each. Other sessions can borrow some of them for in-game work,
+such as mod or Torch fixes. They may not borrow them to check another plugin: that is a PluginCheck run.
+
+- **The user's own cores** are never in a slot: no PluginCheck server, no other PluginCheck container and no borrower runs on them.
+  They are `24-31` unless `PLUGINCHECK_USER_RESERVED_CORES` says otherwise, as a range or a list (`8,9,12-15`); empty means none. A
+  slot with either of its cores reserved is left out. On a 32-thread machine that leaves 12 slots, cores 0-23, where there were 16.
+  Containers outside a slot, such as a build or another stage's server, are pinned to the same cores (`stages/pin.py`), counted from
+  the cores Docker has (`docker info`), as the slots are: Docker Desktop can have fewer than the computer.
+- A session borrows at most 2 slots, and at most 3 sessions borrow at once.
+- **While a run is going**, borrowers together get no slot past all but 4, so the run keeps at least 4 (the pre-container lane's
+  included). With 12 slots and 3 sessions borrowing 2 each, it keeps 6 (5 for the run while the lane has one). **With no run going**
+  there is no such limit, and borrowers may take every slot. A run that starts then uses the slots left, and takes the others back as
+  their leases end; it never stops a borrower's container.
+- **Bench sessions**, those whose name matches `physbench-*` (`PLUGINCHECK_BENCH_SESSIONS`, an fnmatch pattern, case sensitive), may
+  borrow up to 4 slots each, always on adjacent cores (8 cores for 4 slots). At most 3 bench sessions borrow at once, and they count
+  among the 3 sessions. With no run going, three benches at 4 slots each take all 12. During a run two benches at 4 slots reach the
+  limit of 8, so a third then waits; three benches asking for less (such as 4, 2 and 2) all run.
+  - Its first slot is granted only where the whole block fits among slots no other session holds (PluginCheck's busy slots count, since
+    each comes free when its server ends), and each next slot only next to its block. With no run going the block is granted at once;
+    during a run it arrives a slot at a time as the neighbouring servers finish, and a slot next to a growing block goes to it first.
+  - No slot is lent to anyone where it would leave a growing block no room to finish.
+  - Where no place fits the whole block, because other leases split the slots, it waits. During a run, where the limit of 8 leaves less room than
+    it asked for, it gets fewer slots, still adjacent, and grows if room comes back.
+  - Its reply's `cpuset` is its cores together (such as `0-7`), so it can run one container over the block, named after any of its
+    leases. Its slots stay out of use until none of those containers runs.
+- A slot is handed over only when one of PluginCheck's servers finishes in it. A running server is never stopped. With no run
+  going, a request is granted at once.
+- The borrower pins its container to the lease's cores and names it `<session>-<n>`, never `plugincheck-*`.
+- A lease with no heartbeat for 5 minutes ends. If its container still runs, the slot stays out of use until it stops.
+  PluginCheck never stops another session's container.
+- An exclusive request, for measurements that need a quiet machine, drains everything: no new lease, no new PluginCheck
+  server and no new Docker stage of a full run. Whatever is running finishes the step it is on: a server, or one stage. A server that
+  was still waiting for a slot when the request came does not start: it gives the slot back and waits until the request is done. The
+  lease is granted, as cores `all`, once nothing else runs:
+  - no PluginCheck server, and no Docker stage of a full run (`check.py` registers for its whole life and every stage that starts a
+    container waits at its start while a request waits or holds, so each stage boundary is a hold point; `--pre`'s lane steps aside
+    as before);
+  - no lease and no orphaned slot;
+  - no running container the lease file does not know: a `--hold` Quasar, or a container a session started with no lease, holds the
+    grant until it stops. Docker's own build daemon (`buildx_buildkit_*`) is ignored; `PLUGINCHECK_IGNORE_CONTAINERS` adds prefixes.
+    If Docker can't be asked, the lease is not granted.
+  - The holder repeats the request about every 30 seconds until the reply shows the lease, then sends a heartbeat every minute.
+  - Inside the behaviour stage the unit is a server. Its short helper containers (a hash, a probe build) are not held back, but any that
+    is running when the grant is decided holds it.
+- **Borrowers:** every reply carries `exclusiveWaiting`. When it is true, finish the container you are on, release, and ask again once
+  it is done (the request waits for every lease to end, so a long-held lease keeps the machine from being quiet). `waitingFor` says what
+  the drain still waits for, `exclusiveHeld` says the machine is held, and `status` adds `stages` (the Docker stages of full runs in
+  progress) and `unknownContainers`.
+
+The leases are one file, `leases.json`, changed under a lock. It is in `machine/` in this folder unless a shared folder is set, so
+that every copy and session on the computer meets in one file: `PLUGINCHECK_MACHINE_DIR`, or else `machine-dir.txt` in this folder
+(not tracked by git) holding one line, the folder's absolute path. A `machine-dir.txt` that is empty, holds more than one line or a
+relative path stops with an error naming it, rather than leaving the run in a folder of its own. A run copy made by copying the
+checkout keeps sharing the folder only if `machine-dir.txt` is copied with it. PluginCheck's own tests always set
+`PLUGINCHECK_MACHINE_DIR` to a scratch folder (`tests/scratchmachine.py`), and `tests/test_machine_guard.py` fails if a test opens the
+folder the checkout would use without it.
+
+While the behaviour stage runs, its `owner` entry also says what the run is doing, for a machine view: `run`, the run folder as an
+absolute path; `stage`, such as `behaviour: servers`; and `progress`, the numbers the live panel shows (`done`, `total`, `left`,
+`overall`, `failed`). They are written when the stage starts, at each stage change and each finished server, and with every
+heartbeat, and only while that owner runs. They are removed at once at the end of the stage, on an interrupt or a closed console, and
+when the stage ends on a Python error. After a hard kill they go at the next change to the file once the owner's process is gone (a
+full run's own heartbeat makes one every 30 seconds while it goes; `lease.py status` makes one too); a viewer that checks the owner's
+heartbeat stops trusting them within 2 minutes in any case. After a hard kill the run folder is marked ended at the same moment: its
+`live.json` finished, with the running stage `not run`, and a `results.json` with every stage `not run` if it had none.
+
+Sessions use `lease.py`:
+
+```
+python lease.py request   --session NAME --count 2 --purpose "mod fix test"
+python lease.py request   --session physbench-a --count 4 --purpose "physics bench"   # a bench session: 4 adjacent slots
+python lease.py heartbeat --session NAME        # at least every minute while working
+python lease.py release   --session NAME [--cores 4-5]
+python lease.py status
+```
+
+Each call prints the session's leases as JSON. Keep calling `request` or `heartbeat` until the count is reached, then start each
+container with `docker run --cpuset-cpus <cores> --name <container> ...`. The rules are in `stages/leases.py`, tested without
+Docker by `python -m unittest discover -s tests`.
+
+### Machine gate
+A measurement that needs a quiet machine claims it at once with an exclusive request, and waits only for work already running. Work
+that holds no lease, such as a session's build, test suite or live run, calls the gate first, so none starts while a claim waits or
+holds:
+
+```
+python -I lease.py gate --purpose "Inertia build" [--timeout 600] [--session NAME]
+```
+
+- It waits while an exclusive request waits or holds, and while a PluginCheck run is going (One run at a time), then exits 0 and
+  prints `{"gate": "free", ...}`. A session with an exclusive claim of its own passes `--session` and is not held back by a run: the run
+  holds for its claim at the next step.
+- With `--timeout` it exits 3 once that many seconds have passed with the gate still shut (`0` looks once). The message, on stderr,
+  names who claims the machine and since when, and what a waiting claim still waits for; stdout has `{"gate": "shut", "claims": [...]}`.
+- Without `--timeout` it waits as long as the claim lasts, with a line on stderr every 5 minutes. A tool with its own time limit passes
+  one.
+- `--session` leaves that session's own claim out, so a claim's holder can gate its own builds.
+- A claim that has lapsed (no heartbeat for 5 minutes) does not shut it. A lease file it can't read counts as shut, and is named.
+- It starts nothing, opens no window and changes nothing. It is a look before the work starts: work it let through runs to its end, and
+  the claim's holder waits for that itself, such as by watching the processes and CPU. Nothing is paused or suspended.
+- From Python: put this folder on `sys.path`, `import lease`, and call `lease.gate("Inertia build", timeout=600)`. It returns the seconds
+  it waited, or raises `lease.GateTimeout`, whose `claims` lists the same words.
+
+## One run at a time
+One item uses the machine at a time; the rest queue. A full run, and the `--continue` half, waits for the run before it to end, from
+any copy of this version and whatever lease folder it uses:
+
+```
+another PluginCheck run is going: one at a time, so this run waits for its turn (0 s so far)
+the run before has ended after 412 s, so this run starts
+```
+
+- The turn is a lock the operating system holds for the run's process (`stages/leases.py`, `RunQueue`: a named mutex in the logon
+  session on Windows, `flock` elsewhere). It is freed when the process ends, however it ends, so no turn is left behind. Waiting runs
+  are not promised first-come order. `PLUGINCHECK_RUN_QUEUE` gives it another name, for tests only.
+- It takes the turn before anything starts, and a line every 5 minutes says it still waits. Ctrl-C while waiting ends it.
+- The machine gate stays shut while a run holds the turn, so other sessions' builds and live runs queue too. Exclusive requests work
+  as before: a run holding the turn still holds still at its next step for one.
+- `--pre` does not queue: the lane is part of the run whose `behaviour` stage it overlaps.
+- What it cannot cover: a copy of an earlier version (it neither takes nor looks at the turn), and another Windows logon session.
+
+## Pre-container lane
+A run can be split in two, so that everything before `behaviour` happens while another run's `behaviour` still has the machine:
+
+```
+python check.py <target> --pre
+python check.py <target> --continue <run folder>
+```
+
+**`--pre`:**
+- Runs every stage except `behaviour` and `logcheck`, plus `behaviour`'s discovery of every build, one stage at a time, on one slot
+  of PluginCheck's own.
+- The slot is a lease as the session `plugincheck-pre` (`stages/leases.py`, `Lane`). It's granted when one of the running
+  `behaviour` stage's servers finishes, or at once with no run going.
+- It counts against neither borrower limit, so with 3 sessions borrowing 2 slots each, a run on 12 slots keeps 12 - 6 - 1 = 5. It is
+  inside the 4 slots PluginCheck always keeps.
+- Every container the lane starts is pinned to the slot's cores (`stages/pin.py`).
+- An exclusive request makes the lane finish the stage it is on, give the slot back, and wait.
+- The slot goes back as soon as the lane's half ends.
+- It keeps the run folder's data, and writes `pre.json`:
+  - `ready`, or `failed` with the reasons: `manifest` or `lint` failed, discovery didn't pass, or the commands have no current reading;
+  - the plugin's, PluginCheck's, the game's and the target's hashes.
+
+**`--continue`:**
+- Runs `behaviour` and `logcheck` in that same folder, finding the discoveries in the results cache, then clears the data as a run does.
+- It refuses a folder whose `pre.json` isn't `ready`, or whose plugin, PluginCheck stages, game or target changed since.
+
+Both halves are one run, and nothing is reused across runs. `lease.py` refuses the lane's session name.
+
 ## Isolation
 Nothing is shared between systems, so an update or a layout change in one cannot affect another:
 
@@ -198,14 +401,21 @@ Nothing is shared between systems, so an update or a layout change in one cannot
 | Quasar-managed | `plugincheck-ds-quasar` volume | Per run |
 | Torch | `plugincheck-ds-torch` volume | Per run |
 
-Test servers are private and send no telemetry: Torch analytics are off, Magnetar runs with `-consent deny`, and Quasar
-uploads nothing without an admin's consent. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
+Test servers are private. Torch analytics are off, and Quasar uploads nothing without an admin's consent. Magnetar runs with its
+defaults: it adds its companion mod MagnetarMod to the world, and turns its own telemetry off when it has no interactive terminal, as in these containers. The Torch and Legacy stages also block `crash.steampowered.com`, since Steam's
 library hits internal asserts under Legacy and would upload a crash dump for each. Failed test runs do not reach anyone's error
 reports.
 
 Tests are set up as a real server is: a Torch plugin's zip goes into Torch's own `Plugins` folder, and a loader compiles from
-its dev folder. Run data lives on Docker volumes. Mounted Windows folders only hand files in, partly because .NET under Wine,
-which Proton is built on, cannot load larger DLLs from them, and logs are copied out at the end.
+its dev folder. Run data lives on Docker volumes, partly because .NET under Wine, which Proton is built on, cannot load larger DLLs
+from a mounted Windows folder. No server holds a folder of this computer: every server, in the behaviour stage and in the magnetar,
+legacy, torch, quasar and quasar_managed stages, is made with `docker create`, gets its files by `docker cp` as one tar, and then starts
+(`stages/containers.py`). Its logs are copied out the same way at the end. Every docker call these six stages make has a time limit (the
+other stages' docker calls, short builds and checks, and check.py's own have none), and a server that could not get its files ends with
+that reason. Quasar's two versions share one Docker volume for their data, removed at the end, also when the stage is interrupted. Folders of this
+computer are still mounted only into short build runs of the .NET SDK image and lint's Quasar build, which run as root, so Docker
+Desktop's limit on how deep a folder mounted into a container that runs as a user may be no longer applies, and PluginCheck no longer
+checks its own folder's depth.
 
 Our images are kept lean, and each removal was tested by loading a real server. They run as the `server` user, hold no setuid
 programs, and contain no download tools, since each download happens in a build stage that is thrown away. Log files are copied
@@ -249,6 +459,9 @@ Containers are not a hard security boundary. Do not run a plugin you would not t
 | `PLUGINCHECK_TORCH_IMAGE`, `PLUGINCHECK_LEGACY_IMAGE` | Use a different image |
 | `PLUGINCHECK_WORLD` | A save folder for `quasar_managed` to start from, in place of Star System, such as one with grids a plugin acts on, for a hand test with `--hold` |
 | `PULSAR_GITHUB_TOKEN` | A GitHub token, in place of `github-token.txt` |
+| `PLUGINCHECK_USER_RESERVED_CORES` | The user's own logical cores, never in a slot or a container's cpuset. The default is `24-31`; empty for none |
+| `PLUGINCHECK_BENCH_SESSIONS` | The fnmatch pattern of bench sessions, which may borrow 4 adjacent slots. The default is `physbench-*`; empty for none |
+| `PLUGINCHECK_RUN_QUEUE` | Another name for the one-run-at-a-time turn, for tests that must not wait on a real run |
 
 ## Add a plugin
 Add `targets/<name>.json`. Leave out the sections the plugin does not have:
@@ -267,6 +480,10 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
 - **Quasar 1.4.1.1 image:** `release.json` says `1.4.1-1` while the program reports `1.4.1.1`, so it cannot write the
   migration receipt that Quasar 1.5 requires, and a fresh 1.5 container cannot start. The `quasar` stage corrects that
   one field for the 1.4.1.1 step, so Quasar's own code writes the real receipt. Results record `releaseJsonWorkaround`.
+- **Torch passes the wrong arguments for some values.** `CommandTree.GetCommand` finds a command's arguments by searching the whole line for
+  the first one, so `on` in `!monitor everything on` is found in "monitor" and the handler gets `onitor everything on`. The `commands` stage warns
+  about values a Torch handler compares that also appear in its own words, and lists the ones taking free text. The Torch probe compares what
+  Torch would pass with what was typed on every line it runs, and `behaviour` prints a `TORCH-ARGS` lead when they differ.
 - **GitHub's limit stops Magnetar.** Magnetar fetches its core plugins from GitHub, 60 requests an hour without a token. When it runs out,
   `magnetar` and `legacy` end as `unable to verify` with the time it resets, and `regcheck` as `not run`. Run them again after that.
   `behaviour` waits for the reset by itself. A token avoids this, and `cache/magnetar-github` keeps each game build's downloads, so later
@@ -275,7 +492,8 @@ Add `targets/<name>.json`. Leave out the sections the plugin does not have:
   up. `magnetar` and `legacy` end as `unable to verify`. `behaviour` tries a server 3 times, then reports it as `FAILED`, or lists the
   build in `buildsLeftOut`. A working build that can't be discovered stops the stage as `not run`, and a published one only narrows the comparison.
 - **Load stages prove commands register, not that they work.** Magnetar has no console, and `!help` only runs from in-game chat. `behaviour`
-  runs each command through the probe, within the limits under [Behaviour](#behaviour).
+  runs each command through the probe, within the limits under [Behaviour](#behaviour). Quasar only proves the plugin loads, serves its pages and
+  reaches its settings, and Legacy runs commands only with `"legacy": true` in the target's `behaviour` section.
 - **Torch and Legacy run under Proton.** Proton is not Windows, so a failure is a lead. Confirm it on Windows before calling it
   a plugin defect. `steamcmd`'s Linux `steamclient.so` is linked in for Proton's Steam bridge, so no Steam client or sign-in is
   needed.

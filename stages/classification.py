@@ -11,15 +11,31 @@ so changed code needs reading again. With no current classification, every comma
 
 settings lists every on/off setting the command's code can reach, so only those get flipped. Leave it out to flip all of them.
 
+examples lists real ways to run a command, because a placeholder argument only reaches its first check. Each is a line, or
+{"line": "...", "caller": "player" or "admin", "online": true}. A caller runs it as an online player of that rank instead of the console. online
+adds the online players without changing who runs it. The fixture's names are the only ones that exist: FixturePlayer, FixtureRecent, the grids
+in fixture.py, and, once a scenario has a caller or online, ProbeCaller and ProbeTarget, who are online with characters. With examples, only they run.
+
+A line can also say settle (seconds after the world is ready before it runs), min (seconds to keep watching afterwards), settings (values for this line
+only, of any type), flip false (do not repeat this line with each on/off setting) and node true (run on Magnetar as a cluster node with a shared folder).
+Lines joined with " && " run one after the other on one server, so one command can set up the next. The probe has lines of its own for such a chain:
+probe:wait <seconds>, probe:sit <cockpit name> (seats the caller), probe:off <block name>, probe:file <path under the user data folder> (its text), probe:storage <programmable block name> (the Storage the block holds), probe:recompile <block name>, probe:save, probe:empty (empties every block named watch-*), probe:fill <block> <ore> <amount>,
+probe:sharedwrite <path under the plugin's shared folder> <text>, probe:sharedread <path> and probe:sharedremove <path>. The last three stand in for another node.
+
+  "!economy give": {"reads": ["economy"], "writes": ["economy"], "settings": [], "why": "...", "examples": ["!economy give FixturePlayer 100"]},
+  "!economy top":  {"reads": ["economy"], "writes": [], "settings": ["PublicBalances"], "why": "...", "examples": [
+    "!economy top", {"line": "!economy top", "caller": "player"}, {"line": "!economy top", "caller": "admin"}]}
+
 Changing the world is not a reason to run alone. Commands share a server unless they overlap: one writes something another reads or writes.
 reads and writes name what the command depends on or changes, in any useful words: grids, players, factions, economy, weather, voxels,
 plugin-config, plugin-files. The names only have to match between commands, so use the same word for the same thing. "*" means it could
 reach anything, such as a command that restarts the server, so it always gets its own.
 """
 import hashlib, json, os
+import repocopy
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SKIP = {'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries', 'Build', 'node_modules'}
+SKIP = {'.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries', 'Build', 'node_modules'}
 EVERYTHING = {'*'}
 
 
@@ -30,7 +46,7 @@ def path_for(name):
 def source_hash(repo):
     """Of every C# file, so any change to the code asks for a fresh reading."""
     digest = hashlib.sha256()
-    for folder, subfolders, files in os.walk(repo):
+    for folder, subfolders, files in repocopy.walk(repo):
         # Pruned here, as the walk goes. Sorting the walk would read every folder first, game binaries included.
         subfolders[:] = sorted(s for s in subfolders if s not in SKIP)
         for name in sorted(files):
@@ -62,6 +78,22 @@ def settings_read(name, repo):
     return {line.lower(): set(entry['settings']) for line, entry in data.get('commands', {}).items() if 'settings' in entry}
 
 
+def examples(name, repo):
+    """The real lines each command was given, as {command: [{line, caller, online}]}. Empty when there is no reading for this source."""
+    try:
+        data = json.load(open(path_for(name), encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    if data.get('source') != source_hash(repo):
+        return {}
+    found = {}
+    for command, entry in data.get('commands', {}).items():
+        lines = [{'line': e} if isinstance(e, str) else e for e in entry.get('examples', [])]
+        if lines:
+            found[command.lower()] = lines
+    return found
+
+
 def best_match(command, known):
     """The longest known command a line starts with, since arguments do not change what it is."""
     line = (command or '').lower()
@@ -72,7 +104,7 @@ def best_match(command, known):
 def folder_hash(folder):
     """Of every file in a folder, for anything that decides a result: a plugin's project files as well as its code."""
     digest = hashlib.sha256()
-    for root, subfolders, files in os.walk(folder):
+    for root, subfolders, files in repocopy.walk(folder):
         subfolders[:] = sorted(s for s in subfolders if s not in SKIP)
         for name in sorted(files):
             digest.update(os.path.relpath(os.path.join(root, name), folder).replace(os.sep, '/').encode())
@@ -103,7 +135,8 @@ def batches(plans, known):
     """
     groups = {}
     for plan in plans:
-        groups.setdefault(tuple(sorted(plan.get('settings', {}).items())), []).append(plan)
+        # Online players change what every command in a server sees, so scenarios with them do not share with those without.
+        groups.setdefault((tuple(sorted(plan.get('settings', {}).items())), bool(plan.get('players')), plan.get('settle'), plan.get('node')), []).append(plan)
     out = []
     for group in groups.values():
         # So does a scenario that removes things, because that would reach anything sharing its server.

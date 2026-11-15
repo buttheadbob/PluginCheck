@@ -6,12 +6,15 @@ Each rule has an id, a severity and the reason behind it, so a report can cite i
 person to judge it. Rules are line based, so a hit is a lead to read in context.
 """
 import json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 
 # id, severity, applies to (all, magnetar, shared, torch, quasar), pattern, why
 RULES = [
-    ('PC001', 'error', 'all', r'\.UnpatchAll\(', 'UnpatchAll removes other plugins\' patches too. Undo only your own.'),
+    # UnpatchAll(id) undoes only that Harmony id's patches. With no id, or null, it undoes every plugin's.
+    ('PC001', 'error', 'all', r'\.UnpatchAll\(\s*(null\s*)?\)','UnpatchAll removes other plugins\' patches too. Undo only your own.'),
     ('PC002', 'error', 'all', r'SpecialFolder\.(Local)?ApplicationData', 'The game supports -appdata. Use MyFileSystem.UserDataPath.'),
     ('PC003', 'warn', 'all', r'MyFileSystem\.(ContentPath|ModsPath)\b.*(Write|Delete|Create|Move|Copy)|(Write|Delete|Create|Move)\w*\(.*MyFileSystem\.(ContentPath|ModsPath)', 'Never change game or mod files. Removing a plugin must undo its effects.'),
     ('PC004', 'error', 'all', r'\bEnvironment\.(Exit|FailFast)\(', 'A plugin must not kill the server process. Use ServerControl or the loader.'),
@@ -59,7 +62,7 @@ def scopes(rel):
 
 
 found = []
-for d, ds, fs in os.walk(repo):
+for d, ds, fs in repocopy.walk(repo):
     ds[:] = [x for x in ds if x not in SKIP]
     for f in fs:
         if not f.endswith(('.cs', '.razor', '.cshtml')):

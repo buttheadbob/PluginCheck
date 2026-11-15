@@ -106,6 +106,12 @@ def connector_pair(parent_name, sub_name, at, owner):
     return [grid(parent_name, at, parent), grid(sub_name, sub_at, sub)]
 
 
+def pad(name, at):
+    """A static plate just under a grid at this position. 0.1 m of air keeps the two from starting inside each other."""
+    plate = [armor((x, 0, z)) for x in range(-1, 4) for z in range(-1, 3)]
+    return [grid(name, (at[0], at[1] - LARGE_BLOCK - 0.1, at[2]), plate, static=True)]
+
+
 def world(moon_position=None, moon_radius=None):
     """Every grid in the fixture, as sector objects."""
     Ids.next = 510000000000000000
@@ -130,12 +136,13 @@ def world(moon_position=None, moon_radius=None):
     ]):
         grids += build(at(slot))
     if moon_position:
-        # Inside the moon's gravity, which ends at 5% strength: 9785 * 5^(1/7), about 12300 m from its centre. High enough that a grid falling
-        # from here is still in the air when a scenario ends.
+        # Inside the moon's gravity, which ends at 5% strength: 9785 * 5^(1/7), about 12300 m from its centre. Each stands on a static pad, because
+        # a grid left to fall hits the moon about a minute later, so what a scenario found depended on how long its server had been up.
         x, y, z = moon_position
         high = moon_radius + 2500
-        grids += plain('planet-large', (x, y + high, z), OLD_PLAYER)
-        grids += rotor_pair('planet-rotor-parent', 'planet-rotor-sub', (x + SPACING, y + high, z), OLD_PLAYER)
+        for name, at, build in (('planet-pad', (x, y + high, z), lambda p: plain('planet-large', p, OLD_PLAYER)),
+                                ('planet-pad-2', (x + SPACING, y + high, z), lambda p: rotor_pair('planet-rotor-parent', 'planet-rotor-sub', p, OLD_PLAYER))):
+            grids += pad(name, at) + build(at)
     return grids
 
 
@@ -152,35 +159,43 @@ def moon(text):
     return planet, centre, float(re.search(r'<Radius>([\d.]+)</Radius>', planet).group(1))
 
 
-def second_player(checkpoint, now):
+def add_player(checkpoint, now, identity_id, steam, name):
     """Copies the save's only player as one who logged out moments ago, so offline limits have both sides."""
     item = re.search(r'<AllPlayersData>\s*<dictionary>\s*(<item>.*?</item>)', checkpoint, re.S).group(1)
-    copy = (item.replace(str(OLD_PLAYER_STEAM), str(RECENT_PLAYER_STEAM)).replace(str(OLD_PLAYER), str(RECENT_PLAYER))
-            .replace('FixturePlayer', 'FixtureRecent'))
+    copy = item.replace(str(OLD_PLAYER_STEAM), str(steam)).replace(str(OLD_PLAYER), str(identity_id)).replace('FixturePlayer', name)
     checkpoint = checkpoint.replace(item, item + copy, 1)
-    identity = (f'<MyObjectBuilder_Identity><IdentityId>{RECENT_PLAYER}</IdentityId><DisplayName>FixtureRecent</DisplayName>'
+    identity = (f'<MyObjectBuilder_Identity><IdentityId>{identity_id}</IdentityId><DisplayName>{name}</DisplayName>'
                 f'<CharacterEntityId>0</CharacterEntityId><Model>Default_Astronaut</Model><BlockLimitModifier>0</BlockLimitModifier>'
                 f'<LastLoginTime>{now}</LastLoginTime><LastLogoutTime>{now}</LastLogoutTime></MyObjectBuilder_Identity>')
     return checkpoint.replace('</Identities>', identity + '</Identities>', 1)
 
 
-def build(empty_world, moon_sector, out):
+def server_settings(text):
+    """An Empty World save says OFFLINE, where the game makes everyone an Owner, so no permission check would ever refuse anyone. Trash removal is
+    off because it deletes small grids far from a player as soon as one is online."""
+    return text.replace('<OnlineMode>OFFLINE</OnlineMode>', '<OnlineMode>PRIVATE</OnlineMode><TrashRemovalEnabled>false</TrashRemovalEnabled>')
+
+
+def build(empty_world, moon_sector, out, programmable_blocks=False, ship_drills=False):
     """Writes the fixture save to out, from copies of the game's Empty World and Moon Base saves."""
     os.makedirs(out, exist_ok=True)
     read = lambda name: open(os.path.join(empty_world, name), encoding='utf-8').read()
 
     planet, moon_position, moon_radius = moon(open(moon_sector, encoding='utf-8').read())
-    objects = planet + ''.join(world(moon_position, moon_radius))
+    import drilling, programmable
+    grids = world(moon_position, moon_radius) + (programmable.objects() if programmable_blocks else []) + (drilling.objects() if ship_drills else [])
+    objects = planet + ''.join(grids)
     sector = re.sub(r'<SectorObjects>.*</SectorObjects>', lambda _: f'<SectorObjects>{objects}</SectorObjects>', read('SANDBOX_0_0_0_.sbs'), flags=re.S)
 
     now = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-    checkpoint = read('Sandbox.sbc')
+    checkpoint = server_settings(read('Sandbox.sbc'))
     checkpoint = re.sub(r'<ControlledEntities>.*?</ControlledEntities>', '<ControlledEntities><dictionary /></ControlledEntities>', checkpoint, flags=re.S)
     checkpoint = checkpoint.replace('<CameraController>Entity</CameraController>', '<CameraController>Spectator</CameraController>')
     checkpoint = re.sub(r'<CharacterEntityId>\d+</CharacterEntityId>', '<CharacterEntityId>0</CharacterEntityId>', checkpoint)
     checkpoint = re.sub(r'<ClientId>\d+</ClientId>', f'<ClientId>{OLD_PLAYER_STEAM}</ClientId>', checkpoint)
     checkpoint = checkpoint.replace('Skinface', 'FixturePlayer').replace('<Connected>true</Connected>', '<Connected>false</Connected>')
-    checkpoint = second_player(checkpoint, now)
+    for identity, steam, name in [(RECENT_PLAYER, RECENT_PLAYER_STEAM, 'FixtureRecent')] + (list(programmable.PLAYERS) if programmable_blocks or ship_drills else []):
+        checkpoint = add_player(checkpoint, now, identity, steam, name)
     checkpoint = checkpoint.replace('</LastLoginTime>\n    </MyObjectBuilder_Identity>', '</LastLoginTime>\n      <LastLogoutTime>2016-12-19T15:09:41</LastLogoutTime>\n    </MyObjectBuilder_Identity>')
     checkpoint = re.sub(r'<NonPlayerIdentities\s*/>|<NonPlayerIdentities>.*?</NonPlayerIdentities>', f'<NonPlayerIdentities><long>{NPC}</long></NonPlayerIdentities>', checkpoint, flags=re.S)
 
@@ -191,4 +206,4 @@ def build(empty_world, moon_sector, out):
         if name.endswith('.vx2'):
             shutil.copy(os.path.join(empty_world, name), out)
     # The compressed copy would win over the text one, so it is left behind.
-    open(os.path.join(out, 'Sandbox_config.sbc'), 'w', encoding='utf-8', newline='\n').write(read('Sandbox_config.sbc'))
+    open(os.path.join(out, 'Sandbox_config.sbc'), 'w', encoding='utf-8', newline='\n').write(server_settings(read('Sandbox_config.sbc')))

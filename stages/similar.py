@@ -7,14 +7,14 @@ two plugins overlap is a matter of meaning, so an AI reads the file and judges i
 """
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-import githubtoken
+import githubtoken, repocopy
 import io, json, os, re, sys, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 
 SOURCES = {'MagnetarHub': 'https://codeload.github.com/CometWorks/magnetar-hub/zip/refs/heads/main',
            'QuasarHub': 'https://codeload.github.com/CometWorks/quasar-hub/zip/refs/heads/main'}
 TORCH = 'https://torchapi.com/api/plugins'
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs'}
 LENGTH = 320
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -71,7 +71,7 @@ others = [p for p in plugins if (p['id'] or '').lower() not in own_ids]
 
 # What this plugin claims, so the comparison has something to start from.
 roots = set()
-for d, ds, fs in os.walk(repo):
+for d, ds, fs in repocopy.walk(repo):
     ds[:] = [x for x in ds if x not in SKIP]
     for f in fs:
         if f.endswith('.cs'):

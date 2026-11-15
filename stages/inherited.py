@@ -13,6 +13,8 @@ subtracted to give the adjusted figure. Report the range. Code rewritten from th
 without any line matching, so even the raw figure is not a ceiling.
 """
 import collections, io, json, os, re, sys, urllib.request, zipfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
 from difflib import SequenceMatcher
 
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -25,7 +27,7 @@ upstream = os.path.join(unpacked, os.listdir(unpacked)[0], target.get('upstreamS
 EXCLUDE = tuple(target.get('exclude', []))
 KNOWN_NEW = tuple(target.get('knownNew', []))
 EXT = ('.cs', '.xaml')
-SKIP = {'bin', 'obj', '.git', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Essentials.Tests', 'Jenkins'}
+SKIP = {'.claude', 'bin', 'obj', '.git', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Essentials.Tests', 'Jenkins'}
 KW = set('''if else for foreach while do return var new public private protected internal static void bool int long
 double float string class struct enum namespace try catch finally throw null true false this base in out ref is as
 continue break switch case default using readonly const override virtual abstract sealed async await params typeof'''.split())
@@ -54,7 +56,7 @@ def code_lines(path):
     return out
 
 def walk(root):
-    for d, ds, fs in os.walk(root):
+    for d, ds, fs in repocopy.walk(root):
         ds[:] = [x for x in ds if x not in SKIP]
         for f in fs:
             if f.endswith(EXT) and f != 'AssemblyVersion.cs':

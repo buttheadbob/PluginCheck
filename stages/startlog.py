@@ -41,6 +41,15 @@ def loader_stopped(text):
     return f'Magnetar could not load {what} and stopped, so the plugin never started. Read info.log for the cause.'
 
 
+def steam_stopped(text):
+    """Why Steam kept a server from starting, or None. Neither of these reaches the plugin, and both pass by themselves."""
+    if 'Unable to download mods' in text:
+        return 'Steam could not download a mod the server needs, so the plugin never started.'
+    if 'No IP assigned' in text:
+        return 'Steam gave the server no IP address, so the plugin never started.'
+    return None
+
+
 def last_lines(text, count=5):
     """The end of a log, for a server that stopped with no known cause."""
     return ' | '.join(line.strip()[:160] for line in text.splitlines()[-count:] if line.strip())

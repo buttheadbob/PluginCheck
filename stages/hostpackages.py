@@ -11,8 +11,10 @@ it, which is fine for IDE use, since hub loaders ignore project files.
 """
 import json, os, re, subprocess, sys, zipfile
 import xml.etree.ElementTree as ET
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin, repocopy
 
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules'}
 # Packages whose DLL is not named after them.
 DLL_NAMES = {'lib.harmony': '0harmony', 'harmony': '0harmony', 'protobuf-net': 'protobuf.net', 'protobuf-net.core': 'protobuf.net.core'}
 
@@ -28,7 +30,7 @@ def docker(*args):
 
 def listing(image, folder, volume=None):
     mount = ['-v', f'{volume}:/ds:ro'] if volume else []
-    r = docker('run', '--rm', *mount, '--entrypoint', 'sh', image, '-c', f'ls {folder} 2>/dev/null')
+    r = docker('run', *pin.args(), '--rm', *mount, '--entrypoint', 'sh', image, '-c', f'ls {folder} 2>/dev/null')
     names = {os.path.splitext(n.strip().lower())[0] for n in r.stdout.splitlines() if n.strip().lower().endswith('.dll')}
     return names
 
@@ -90,7 +92,7 @@ if 'torch' in target and os.path.isfile(zip_path):
                    'Shipped in the zip, and the host already has it.' if by else 'Shipped in the zip. Check it is needed and its origin is known.')
 
 # 3. Project files: not shipped by hub builds, so these are notes.
-for d, ds, fs in os.walk(repo):
+for d, ds, fs in repocopy.walk(repo):
     ds[:] = [x for x in ds if x not in SKIP]
     for f in fs:
         if not f.endswith('.csproj'):

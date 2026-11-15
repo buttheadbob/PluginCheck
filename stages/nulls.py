@@ -11,6 +11,8 @@ miss a real case, and a clean result does not prove the code is safe.
 """
 import io, json, os, shutil, subprocess, sys, urllib.request, zipfile
 import xml.etree.ElementTree as ET
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import pin
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = 'plugincheck-torch-proton:latest'
@@ -46,7 +48,7 @@ def copy_out(image, folder, into):
 
 
 volume = 'plugincheck-ds-magnetar'
-if docker('run', '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
+if docker('run', *pin.args(), '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
     finish('not run', reason='no dedicated server yet. Run the magnetar stage first.')
 
 folders = []
@@ -57,13 +59,17 @@ if target.get('torch', {}).get('project'):
     folders.append(os.path.dirname(target['torch']['project']) or '.')
     if os.path.isdir(os.path.join(repo, 'Shared')) and 'Shared' not in folders:
         folders.append('Shared')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
+folders += [f for f in repocopy.companion_folders(repo, target) if f not in folders]
 if not folders:
-    finish('not run', reason='needs a Magnetar manifest or a Torch project to know which source to read')
+    finish('not run', reason='needs a Magnetar manifest, a Torch project or a Quasar companion to know which source to read')
 
 source = os.path.join(work, 'source')
-skip = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries')
+skip = repocopy.unlinked(shutil.ignore_patterns('.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries'))
 for folder in folders:
     shutil.copytree(os.path.join(repo, folder), os.path.join(source, folder), ignore=skip, dirs_exist_ok=True)
+repocopy.add_implicit_usings(repo, folders, source)
 listed = ['/work/source/' + os.path.relpath(os.path.join(d, f), source).replace(os.sep, '/')
           for d, _, fs in os.walk(source) for f in fs if f.endswith('.cs')]
 open(os.path.join(work, 'sources.txt'), 'w', encoding='utf-8', newline='\n').write('\n'.join(listed))
@@ -83,7 +89,7 @@ if 'torch' in target and docker('image', 'inspect', TORCH).returncode == 0 and c
 shutil.copytree(os.path.join(here, 'nullcheck'), os.path.join(work, 'src'), dirs_exist_ok=True)
 command = ('set -e; cd /work/src; dotnet build -c Release -v q -nologo -o /work/out >/work/build.log 2>&1; '
            f'dotnet /work/out/nullcheck.dll /work/sources.txt {" ".join(refs)} /ds/DedicatedServer64')
-r = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
+r = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
 try:
     report = json.loads(r.stdout.strip().splitlines()[-1])
 except (IndexError, ValueError):

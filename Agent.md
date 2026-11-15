@@ -15,6 +15,12 @@ because it is how the user watches a run. `stages/display.py` only draws it on a
    `tee`, and do not set `PLUGINCHECK_PLAIN=1` unless the user asks. Any of these turns the panel off.
 3. Follow the run from its files, not its output. `runs/<target>/<timestamp>/results.json` is updated after every stage, and each stage's log
    can be followed live, so nothing needs capturing.
+4. A run under a session's exclusive lease (a pass that needs the machine to itself) uses the shared lease folder like any run, so the
+   machine view shows it as the owner: the checkout or run copy carries `machine-dir.txt` (README, Lending slots). Never point
+   `PLUGINCHECK_MACHINE_DIR` at a scratch folder for it. The run holds still while any exclusive lease or request is in that file, its
+   holder's too, so the holder must release its exclusive lease before it starts the run. One run at a time and the machine gate then
+   keep other runs and sessions' gated work out. The limit: a lease request (`lease.py request`) is not gated, so in the moment between
+   the release and the run's start, and while it runs (all but the 4 slots the run keeps), another session can still be granted slots.
 
 ## Get ready before a full run
 
@@ -27,24 +33,50 @@ A `behaviour` run can take hundreds of servers, so make sure it will work before
    run everything.
 4. `behaviour` stops by itself as `not run` if a working build can't be discovered, because the rest of the run couldn't compare it. Fix the reason
    it gives, then run it again. A published build left out doesn't stop the run, it only narrows the comparison.
-5. Changing `behaviour.py`, the fixture or the probes throws away every saved server result. Make those changes before a run, not between runs,
+   `behaviour stopped: Docker stalled` (exit 1) means its watchdog stopped it: report the run as failed, never as a pass, say so first in
+   the report, and run it again once Docker answers.
+5. Changing what shapes a server throws away every saved server result: the server code in `behaviour.py` (`stages/behaviour/serverhash.py`
+   says which), `stages/containers.py`, the fixture or the probes. Make those changes before a run, not between runs,
    and only when the user agrees.
 6. Changing a plugin's source also needs a new command classification. Otherwise every command gets its own server and every setting is flipped.
+7. While another run's `behaviour` has the machine, the first half of a run can go ahead in the pre-container lane:
+   `python check.py <target> --pre`, then `python check.py <target> --continue <run folder>` once the machine is free (README,
+   Pre-container lane). Both halves go in a terminal the user can see, like any run.
 
 ## Classify commands before a run
 
 What a command touches is a judgement about its code, so it is yours to make. `behaviour` uses it to decide what shares a server.
+Make the reading, and give every lead from the stages before `behaviour` its verdict, before the run reaches `behaviour`: the
+reading decides which commands share a server, and a `--pre` half with no current reading ends `failed` (README, Pre-container lane).
 
 1. Run `python check.py <target> --only commands`. It prints a `CLASSIFY` line for each command when no current reading exists.
 2. Read every handler, and everything it calls.
 3. Write the file it names, as `stages/classification.py` describes. List what each command `reads` and `writes`, the on/off `settings` its code can
    reach, and the file and line that show it in `why`. Use the same word for the same thing across commands. Only listed settings get flipped, so
    follow the code all the way down, and leave `settings` out if you cannot tell.
+4. Give every command that takes a value real `examples`, using names that exist in the fixture, and a `caller` where the code acts on who ran it.
+   A permission, privacy or "in-game only" check needs a `player` line and an `admin` line, or it has not been tested. A `NO EXAMPLE` line in
+   `behaviour` is a gap in your reading, unless the command needs a list setting the fixture does not have.
+5. Write example lines in the command's real case, as `commands` prints it. Torch does not find `!pblimiter getreport` for `!PBLimiter GetReport`.
+6. A plugin may act only on things some targets have, such as programmable blocks. Work out what its code needs in the world before a run, and when a test world is what leaves code unreached, report what closes the gap: what must exist, how many, owned by whom, what any script must do, which code each item reaches, and who can build it. If it can be built, it is built before the full run.
 
 Changing the world is not a reason to run alone. Commands share a server unless they overlap, so a command that pays a player and one that sets the
 weather can share. Use `"writes": ["*"]` only for a command that could reach anything, such as one that restarts the server.
 
 A command that changes something it does not declare fails loudly, and reruns alone. Source changes need a fresh reading.
+
+## Check that commands really ran
+
+Results say a server finished, and two builds that fail the same way agree. Neither says a command did its work. Before you report any `behaviour` result:
+
+1. Read `behaviour-replies.txt` from start to finish, for every host. A reply such as "not found", "usage" or "in-game only" means the command stopped at
+   its first check, so it was not tested, whatever the stage's status says.
+2. Say in your report how many commands reached their logic on each host, and name the ones that did not. Never report a count of servers or
+   results as if it were coverage.
+3. Treat `FAILED ... never ran` as a defect in PluginCheck or the example. Find the cause before you give it a verdict. Never explain it away.
+4. Claim only what ran. A host that only loaded the plugin proved that it loads, and a line that was never run is read code, not tested code.
+5. Treat `TORCH-ARGS` as a command that did not get what was typed. Torch finds a command's arguments by searching the whole line for the first one, so
+   `on` in `!monitor everything on` is found in "monitor". Read that reply, and give it a real example if `commands` warned about a value no example used.
 
 ## Read before you report
 
@@ -111,6 +143,8 @@ again, and test the fix. When you are only reviewing a plugin, tell the user wha
 - You never run git yourself. PluginCheck can use git to download repositories into its cache, and a skill's own setup and scripts can use the git
   and `gh` they need. Anything that changes the user's repositories or posts for them still needs the user to ask, each time.
 - PluginCheck is fully automated. Never make a stage depend on a person writing or checking a per-plugin file.
-- Never cap a run. There is always enough time for PluginCheck to run properly.
+- Never cap a run. There is always enough time for PluginCheck to run properly. The one exception:
+  `behaviour` ends a single server that has written no log line for 10 minutes, has no record and is not compiling, and reports it as
+  `FAILED … timeout` with its last lines. Retries stay as they are, and the run itself is never ended.
 - A reused result is still a result. Judge it like any other, and say in your report what was reused.
 - Comparisons are not tied to a platform. Never require both sides to be on the same one.

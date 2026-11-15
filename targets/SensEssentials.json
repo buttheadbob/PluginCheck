@@ -18,5 +18,8 @@
     "project": "TorchPlugin/SensEssentials.csproj",
     "zip": "Build/SensEssentials.zip",
     "guid": "5f03c207-1eab-433d-99fd-114392a8409d"
+  },
+  "behaviour": {
+    "legacy": true
   }
 }

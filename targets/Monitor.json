@@ -71,6 +71,7 @@
           "name": "gear-parent"
         }
       ]
-    }
+    },
+    "shipDrills": true
   }
 }

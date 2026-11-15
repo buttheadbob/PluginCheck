@@ -36,7 +36,7 @@ commit, which never changes, and others for a day. Pass --refresh to check.py to
 """
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-import githubtoken
+import githubtoken, repocopy
 import collections, concurrent.futures, hashlib, io, json, os, re, shutil, sys, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 
@@ -47,7 +47,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, 'cache', 'sources')
 MAX_AGE = 24 * 3600
 MAX_DOWNLOAD = 60 * 1024 * 1024
-SKIP = {'.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules', 'Tests'}
+SKIP = {'.claude', '.git', 'bin', 'obj', 'packages', 'GameBinaries', 'TorchBinaries', 'Build', '.vs', 'node_modules', 'Tests'}
 EXTENSIONS = ('.cs', '.razor', '.xaml')
 LICENSES = ('LICENSE', 'LICENSE.md', 'LICENSE.txt', 'COPYING', 'NOTICE')
 CREDIT_FILES = LICENSES + ('README.md', 'README.txt', 'README', 'CHANGELOG.md', 'CREDITS.md')
@@ -128,7 +128,7 @@ def fetch(item):
 def lines_of(folder):
     """Maps each normalized rare-looking line to the file it came from, plain and with names masked."""
     plain, masked = {}, {}
-    for d, ds, fs in os.walk(folder):
+    for d, ds, fs in repocopy.walk(folder):
         ds[:] = [x for x in ds if x not in SKIP]
         for f in fs:
             if not f.endswith(EXTENSIONS):
@@ -152,7 +152,7 @@ def lines_of(folder):
 def behaviour_of(folder):
     """The command paths and user-facing sentences a project contains."""
     commands, messages = set(), set()
-    for d, ds, fs in os.walk(folder):
+    for d, ds, fs in repocopy.walk(folder):
         ds[:] = [x for x in ds if x not in SKIP]
         for f in fs:
             if not f.endswith('.cs'):
@@ -172,7 +172,7 @@ def behaviour_of(folder):
 def calls_of(folder):
     """Runs of method calls in source order, with comments and text removed, so syntax and formatting do not matter."""
     runs = set()
-    for d, ds, fs in os.walk(folder):
+    for d, ds, fs in repocopy.walk(folder):
         ds[:] = [x for x in ds if x not in SKIP]
         for f in fs:
             if not f.endswith('.cs'):
@@ -220,7 +220,7 @@ def created(repo_name):
 
 def credits(folder, needles):
     """Whether any of these names appears in the project's own readme, license or changelog."""
-    for d, ds, fs in os.walk(folder):
+    for d, ds, fs in repocopy.walk(folder):
         ds[:] = [x for x in ds if x not in SKIP]
         for f in fs:
             if f in CREDIT_FILES:

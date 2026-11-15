@@ -42,11 +42,14 @@ def finish(status, **fields):
     sys.exit(0)
 
 
-if 'magnetar' not in target and 'torch' not in target:
-    finish('not run', reason='needs a Magnetar manifest or a Torch project to know which source to read')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
+import pin
+if 'magnetar' not in target and 'torch' not in target and not repocopy.companion_folders(repo, target):
+    finish('not run', reason='needs a Magnetar manifest, a Torch project or a Quasar companion to know which source to read')
 
 volume = 'plugincheck-ds-magnetar'
-if docker('run', '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
+if docker('run', *pin.args(), '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
     finish('not run', reason='no dedicated server yet. Run the magnetar stage first.')
 
 source = os.path.join(work, 'source')
@@ -58,10 +61,12 @@ if 'torch' in target and target['torch'].get('project'):
     folders.append(os.path.dirname(target['torch']['project']) or '.')
     if os.path.isdir(os.path.join(repo, 'Shared')) and 'Shared' not in folders:
         folders.append('Shared')
-skip = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries')
+folders += [f for f in repocopy.companion_folders(repo, target) if f not in folders]
+skip = repocopy.unlinked(shutil.ignore_patterns('.claude', 'bin', 'obj', '.git', '.vs', 'GameBinaries', 'TorchBinaries'))
 listed = []
 for folder in folders:
     shutil.copytree(os.path.join(repo, folder), os.path.join(source, folder), ignore=skip, dirs_exist_ok=True)
+repocopy.add_implicit_usings(repo, folders, source)
 for d, _, files in os.walk(source):
     for f in files:
         if f.endswith('.cs'):
@@ -101,7 +106,7 @@ if 'torch' in target:
 
 def game_build():
     """A hash of the game's assemblies and the catalog's generator, which is what a catalog is true for."""
-    sums = docker('run', '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
+    sums = docker('run', *pin.args(), '--rm', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
                   'cd /ds/DedicatedServer64; sha256sum Sandbox.*.dll SpaceEngineers.*.dll VRage*.dll | sort -k2')
     if sums.returncode:
         return None
@@ -133,7 +138,7 @@ def thread_catalog():
     print(f'generating the thread catalog for game build {build}')
     earlier = sorted(glob.glob(os.path.join(folder, '*.json')), key=os.path.getmtime)
     shutil.copytree(os.path.join(here, 'threadcatalog'), os.path.join(work, 'catalog-src'), dirs_exist_ok=True)
-    made = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
+    made = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
                   'set -e; cd /work/catalog-src; dotnet build -c Release -v q -nologo -o /work/catalog-out >/work/catalog-build.log 2>&1; '
                   'dotnet /work/catalog-out/threadcatalog.dll /ds/DedicatedServer64 /work/catalog.json')
     print('  ' + made.stdout.strip()[-300:])
@@ -152,7 +157,7 @@ shutil.copy(catalog_path, os.path.join(work, 'catalog.json'))
 shutil.copytree(os.path.join(here, 'threadcheck'), os.path.join(work, 'src'), dirs_exist_ok=True)
 command = ('set -e; cd /work/src; dotnet build -c Release -v q -nologo -o /work/out >/work/build.log 2>&1; '
            f'dotnet /work/out/threadcheck.dll /work/sources.txt /work/catalog.json {" ".join(refs)} /ds/DedicatedServer64')
-r = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
+r = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{volume}:/ds:ro', '--entrypoint', 'bash', SDK, '-c', command)
 try:
     report = json.loads(r.stdout.strip().splitlines()[-1])
 except (IndexError, ValueError):

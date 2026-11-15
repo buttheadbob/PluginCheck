@@ -18,7 +18,9 @@ SDK = 'mcr.microsoft.com/dotnet/sdk:10.0'
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 QUASAR = 'ghcr.io/cometworks/quasar:latest'
 TORCH = 'plugincheck-torch-proton:latest'
-SKIP = shutil.ignore_patterns('bin', 'obj', '.git', '.vs', 'Build', 'GameBinaries', 'TorchBinaries', 'node_modules', 'Directory.Build.props')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # stages run with -I
+import repocopy
+import pin
 # Style rules that only say the code differs from a default, not that anything is wrong.
 ANALYZERS = ['-p:EnableNETAnalyzers=true', '-p:AnalysisMode=Recommended', '-p:AnalysisLevel=latest', '-p:EnforceCodeStyleInBuild=true',
              '-p:GenerateDocumentationFile=false', '-p:TreatWarningsAsErrors=false', '--no-incremental', '-v:quiet', '-nologo']
@@ -30,7 +32,7 @@ result_path = sys.argv[3] if len(sys.argv) > 3 else None
 work = os.path.join(run_dir, 'lint')
 source = os.path.join(work, 'source')
 os.makedirs(work, exist_ok=True)
-shutil.copytree(target['repo'], source, ignore=SKIP)
+shutil.copytree(target['repo'], source, ignore=repocopy.ignore(target['repo']))
 
 
 def docker(*args):
@@ -53,11 +55,11 @@ if 'magnetar' in target and target['magnetar'].get('project'):
     docker('cp', f'{name}:/opt/magnetar/Libraries/MagnetarInterim/.', libs)
     docker('rm', '-v', name)
     args = ' '.join(ANALYZERS + ['-f net10.0', '-c Release', '-p:Dedicated64=/ds/DedicatedServer64', '-p:MagnetarBin=/work/libs', '-p:DeployToMagnetar=false'])
-    builds['magnetar'] = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro',
+    builds['magnetar'] = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro',
                                 '--entrypoint', 'bash', SDK, '-c', f'cd /work/source; dotnet build "{target["magnetar"]["project"]}" {args} 2>&1')
 if 'quasar' in target and target['quasar'].get('project'):
     args = ' '.join(ANALYZERS + ['-c Release', '-p:QuasarPluginAbstractionsAssembly=/opt/quasar/Quasar.Plugin.Abstractions.dll', '-p:DeployToQuasar=false'])
-    builds['quasar'] = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work',
+    builds['quasar'] = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work',
                               '--entrypoint', 'bash', QUASAR, '-c', f'cd /work/source; dotnet build "{target["quasar"]["project"]}" {args} 2>&1')
 
 
@@ -141,7 +143,7 @@ if 'torch' in target and target['torch'].get('project'):
         docker('rm', '-v', name)
         torch_project(target['torch']['project'])
         args = ' '.join(ANALYZERS + ['-c Release'])
-        builds['torch'] = docker('run', '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro',
+        builds['torch'] = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', 'plugincheck-ds-magnetar:/ds:ro',
                                  '--entrypoint', 'bash', SDK, '-c', f'cd /work/torchlint; dotnet build TorchLint.csproj {args} 2>&1')
 if not builds:
     finish('not run', reason='no project to lint')

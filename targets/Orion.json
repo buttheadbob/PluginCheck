@@ -1,0 +1,9 @@
+{
+  "name": "Orion",
+  "repo": "../Orion",
+  "quasar": {
+    "manifest": "quasar-hub.xml",
+    "project": "src/Orion.Quasar/Orion.Quasar.csproj",
+    "packageManifest": "quasar-plugin.json"
+  }
+}
