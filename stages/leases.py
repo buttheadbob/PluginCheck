@@ -1,8 +1,11 @@
 """Slot lending: other sessions borrow PluginCheck's server slots for in-game work, such as mod or Torch fixes, never
 other plugin checks.
 
-PluginCheck's behaviour stage runs its servers in slots of two logical cores each. A borrower asks for up to MAX_PER_SESSION
-slots, and at most MAX_SESSIONS sessions borrow at once, so PluginCheck always keeps the rest. PluginCheck hands a slot over only
+PluginCheck's behaviour stage runs its servers in slots of two logical cores each, made from every core but the user's own
+(USER_RESERVED_CORES), which no slot ever holds. A borrower asks for up to MAX_PER_SESSION slots, a bench session (BENCH_SESSIONS)
+for up to BENCH_MAX_PER_SESSION adjacent ones, and at most MAX_SESSIONS sessions of either kind borrow at once. While a run is going,
+borrowers together get no slot past all but OWN_FLOOR, so the run keeps at least that many; with none going they may take every slot,
+and a run that then starts uses what is left and takes slots back as leases end. PluginCheck hands a slot over only
 when one of its own servers finishes there: it never stops a running server. When no PluginCheck run is going, a request is
 granted at once from the free slots. A borrower keeps its leases alive with a heartbeat; a lease with none for HEARTBEAT_LIMIT
 seconds returns, but a slot whose borrowed container still runs is not reused until it stops. PluginCheck never stops another
@@ -15,8 +18,8 @@ waits or holds, so every stage boundary is a hold point), and no running contain
 (unknown_containers). exclusive_blockers says what the drain still waits for.
 
 PluginCheck's own pre-container lane (check.py --pre) takes one slot as the session LANE. It counts against neither borrower limit,
-so with 3 sessions borrowing 2 slots each a run keeps 16 - 6 - 1 = 9. It is granted like any lease, gives its slot back when it
-ends, and steps aside for an exclusive request (Lane).
+so with 3 sessions borrowing 2 slots each a run on 12 slots keeps 12 - 6 - 1 = 5; for OWN_FLOOR it is PluginCheck's own. It is
+granted like any lease, gives its slot back when it ends, and steps aside for an exclusive request (Lane).
 
 Work that holds no lease, such as a session's build, test suite or live run, calls the machine gate first (gate, lease.py gate): it
 waits while an exclusive request waits or holds, so a measurement can claim the machine at once and waits only for work already running.
@@ -24,12 +27,25 @@ waits while an exclusive request waits or holds, so a measurement can claim the 
 Everything lives in one JSON file, changed under a lock, so any session can use it from the command line (lease.py) and
 PluginCheck from Python. The decisions are plain functions of the state and the time, so they are tested without Docker.
 """
-import contextlib, json, os, re, threading, time, uuid
+import contextlib, fnmatch, json, os, re, threading, time, uuid
 
 # Shared by every session on the machine. PLUGINCHECK_MACHINE_DIR moves it, such as to a folder outside this checkout.
 FOLDER = os.environ.get('PLUGINCHECK_MACHINE_DIR') or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'machine')
 MAX_PER_SESSION = 2
+# Bench sessions and the others together.
 MAX_SESSIONS = 3
+# The user's own logical cores, which no slot holds: no PluginCheck server or container and no borrower runs on them. A range or a list,
+# such as "24-31" or "8,9,12-15"; empty for none. PLUGINCHECK_USER_RESERVED_CORES overrides it. A slot with either core reserved is left out.
+USER_RESERVED_CORES = '24-31'
+# Sessions that measure (an fnmatch pattern, case sensitive; PLUGINCHECK_BENCH_SESSIONS overrides it, empty for none) may hold up to
+# BENCH_MAX_PER_SESSION slots, always on adjacent cores, and at most BENCH_MAX_SESSIONS of them borrow at once, within MAX_SESSIONS.
+BENCH_SESSIONS = 'physbench-*'
+BENCH_MAX_PER_SESSION = 4
+BENCH_MAX_SESSIONS = 3
+# The slots a running PluginCheck keeps, its pre-container lane's included: while a run is going, borrowers get no slot past the rest.
+# With no run going there is no floor.
+OWN_FLOOR = 4
+SLOT_CORES = 2
 HEARTBEAT_LIMIT = 300
 OWNER_LIMIT = 120
 LOCK_STALE = 120
@@ -83,26 +99,162 @@ def held(state, session):
     return [l for l in state['leases'] if l['session'] == session]
 
 
+# ---- Cores and slots ----
+
+def parse_cores(text):
+    """The logical cores in "24-31", "8,9,12-15" or "" (none), as a set. ValueError on anything else."""
+    found = set()
+    for part in (text or '').replace(' ', '').split(','):
+        if not part:
+            continue
+        match = re.fullmatch(r'(\d+)(?:-(\d+))?', part)
+        if not match or (match.group(2) is not None and int(match.group(2)) < int(match.group(1))):
+            raise ValueError(f'reserved cores: "{part}" is not a core or a range such as 24-31')
+        found.update(range(int(match.group(1)), int(match.group(2) or match.group(1)) + 1))
+    return found
+
+
+def reserved_cores():
+    return parse_cores(os.environ.get('PLUGINCHECK_USER_RESERVED_CORES', USER_RESERVED_CORES))
+
+
+def core_count():
+    return int(os.environ.get('PLUGINCHECK_LEASE_CORES', os.cpu_count() or 2))
+
+
+def make_slots(count, reserved=(), size=SLOT_CORES):
+    """Slots of size adjacent cores from cores 0 to count - 1, lowest first. One that would hold a reserved core is left out."""
+    return [f'{first}-{first + size - 1}' for first in range(0, count - size + 1, size)
+            if not any(core in reserved for core in range(first, first + size))]
+
+
+def cpuset(cores):
+    """Logical cores as a cpuset, such as "0-7,16-23"."""
+    ranges = []
+    for core in sorted(set(cores)):
+        if ranges and core == ranges[-1][1] + 1:
+            ranges[-1][1] = core
+        else:
+            ranges.append([core, core])
+    return ','.join(f'{a}-{b}' if a != b else f'{a}' for a, b in ranges)
+
+
+def unreserved_cpuset(count=None):
+    """The cores PluginCheck's containers may use, as a cpuset: every core but the user's. Empty when none of them is reserved."""
+    count = core_count() if count is None else count
+    reserved = reserved_cores()
+    if not any(core < count for core in reserved):
+        return ''
+    return cpuset(core for core in range(count) if core not in reserved)
+
+
+def bounds(slot):
+    first, last = slot.split('-')
+    return int(first), int(last)
+
+
+def slot_cores(slots):
+    return [core for slot in slots for core in range(bounds(slot)[0], bounds(slot)[1] + 1)]
+
+
+def adjacent(a, b):
+    return bounds(a)[1] + 1 == bounds(b)[0] or bounds(b)[1] + 1 == bounds(a)[0]
+
+
+# ---- Who may borrow which slot ----
+
+def bench(session):
+    return session != LANE and fnmatch.fnmatchcase(session, os.environ.get('PLUGINCHECK_BENCH_SESSIONS', BENCH_SESSIONS))
+
+
+def per_session(session):
+    return BENCH_MAX_PER_SESSION if bench(session) else MAX_PER_SESSION
+
+
+def borrowed(state):
+    """The leases that count as borrowed: not an exclusive lease, and not the lane's, which is PluginCheck's own."""
+    return [l for l in state['leases'] if not l.get('exclusive') and l['session'] != LANE]
+
+
 def wants(state, request):
     """How many more slots a request may still get."""
     if request.get('exclusive'):
         return 0
-    have = len(held(state, request['session']))
-    if request['session'] == LANE:
+    session = request['session']
+    have = len(held(state, session))
+    if session == LANE:
         return max(0, 1 - have)
-    if have == 0 and len({l['session'] for l in state['leases'] if not l.get('exclusive') and l['session'] != LANE}) >= MAX_SESSIONS:
-        return 0
-    return max(0, min(request['count'], MAX_PER_SESSION) - have)
+    if have == 0:
+        sessions = {l['session'] for l in borrowed(state)}
+        if len(sessions) >= MAX_SESSIONS or (bench(session) and len({s for s in sessions if bench(s)}) >= BENCH_MAX_SESSIONS):
+            return 0
+    return max(0, min(request['count'], per_session(session)) - have)
 
 
-def next_borrower(state):
-    """The earliest request that may still get a slot, or None. An exclusive request, granted or waiting, stops all others."""
+def room(state, total):
+    """How many more slots borrowers may take, so PluginCheck keeps OWN_FLOOR of total. None when total is not known."""
+    return None if total is None else total - OWN_FLOOR - len(borrowed(state)) - len(state['orphans'])
+
+
+def open_run(state, session, slot, universe):
+    """The adjacent slots around slot that no other session's lease and no orphan holds: as far as session's block could grow."""
+    others = {l['cores'] for l in state['leases'] if l['session'] != session} | {o['cores'] for o in state['orphans']}
+    ordered = sorted(set(universe) | {slot}, key=bounds)
+    first = last = ordered.index(slot)
+    while first > 0 and ordered[first - 1] not in others and adjacent(ordered[first - 1], ordered[first]):
+        first -= 1
+    while last < len(ordered) - 1 and ordered[last + 1] not in others and adjacent(ordered[last], ordered[last + 1]):
+        last += 1
+    return ordered[first:last + 1]
+
+
+def bench_target(state, request, spare):
+    """The size a bench session's block is to reach: what it asked for, up to BENCH_MAX_PER_SESSION and what the floor leaves."""
+    target = min(request['count'], BENCH_MAX_PER_SESSION)
+    return target if spare is None else min(target, len(held(state, request['session'])) + max(0, spare))
+
+
+def may_take(state, request, slot, universe, spare):
+    """A bench session's slots are always adjacent cores. Its first slot must sit where the whole block fits, among slots no other session
+    holds (PluginCheck's busy ones count, since each comes free when its server ends); each next one must touch the block. Others take any."""
+    session = request['session']
+    if not bench(session):
+        return True
+    mine = [l['cores'] for l in held(state, session)]
+    if mine and not any(adjacent(slot, m) for m in mine):
+        return False
+    return universe is None or len(open_run(state, session, slot, universe)) >= bench_target(state, request, spare)
+
+
+def cuts_a_block(state, taker, slot, universe, spare):
+    """True when giving slot to taker would leave a bench session that holds part of its block no room to finish it."""
+    if universe is None:
+        return False
+    for request in state['requests']:
+        session = request['session']
+        if session == taker['session'] or not bench(session) or not held(state, session) or wants(state, request) == 0:
+            continue
+        start = held(state, session)[0]['cores']
+        before = open_run(state, session, start, universe)
+        target = bench_target(state, request, None if spare is None else spare - 1)
+        after = open_run({**state, 'orphans': state['orphans'] + [{'cores': slot}]}, session, start, universe)
+        if len(before) >= target > len(after):
+            return True
+    return False
+
+
+def borrower_for(state, slot, universe=None, floor=True):
+    """The request that gets slot, or None. An exclusive request, granted or waiting, stops all others. Within the floor (OWN_FLOOR, only
+    with floor, which is while a run is going), a bench session whose block this slot extends goes first, then the earliest request that may
+    take it. universe: every slot of the machine, for the floor and the blocks; None leaves both out."""
     if exclusive_wanted(state):
         return None
-    for request in sorted(state['requests'], key=lambda r: r['since']):
-        if wants(state, request) > 0:
-            return request
-    return None
+    spare = room(state, len(set(universe) | {slot})) if floor and universe is not None else None
+    fits = [r for r in sorted(state['requests'], key=lambda r: r['since'])
+            if wants(state, r) > 0 and (r['session'] == LANE or spare is None or spare > 0)
+            and may_take(state, r, slot, universe, spare) and not cuts_a_block(state, r, slot, universe, spare)]
+    growing = [r for r in fits if bench(r['session']) and held(state, r['session'])]
+    return (growing or fits or [None])[0]
 
 
 def grant(state, request, cores, now):
@@ -126,17 +278,24 @@ def expire(state, now, container_running=lambda name: False, alive=None):
     if state.get('owner') and state['owner'].get('running') and not owner_active(state, now):
         state['owner']['running'] = False
     state['runs'] = [r for r in state.get('runs', []) if now - r.get('heartbeat', 0) <= OWNER_LIMIT and alive(r.get('pid'))]
+    # A bench session may run one container over its whole block, named after any of its leases: each of its slots waits for all of them.
+    blocks = {}
+    for item in state['leases'] + state['orphans']:
+        if item.get('container') and bench(item['session']):
+            blocks.setdefault(item['session'], set()).add(item['container'])
     for lease in list(state['leases']):
         if now - lease['heartbeat'] > HEARTBEAT_LIMIT:
             state['leases'].remove(lease)
             if lease.get('exclusive'):
                 continue
-            if container_running(lease['container']):
+            if lease['session'] in blocks:
+                lease['watch'] = sorted(blocks[lease['session']])
+            if any(container_running(name) for name in lease.get('watch', [lease['container']])):
                 state['orphans'].append(lease)
             else:
                 back.append(lease['cores'])
     for orphan in list(state['orphans']):
-        if not container_running(orphan['container']):
+        if not any(container_running(name) for name in orphan.get('watch', [orphan['container']])):
             state['orphans'].remove(orphan)
             back.append(orphan['cores'])
     state['requests'] = [r for r in state['requests'] if now - r.get('heartbeat', r['since']) <= HEARTBEAT_LIMIT]
@@ -149,6 +308,9 @@ def request(state, session, count, now, exclusive=False, purpose='', log=None):
         raise ValueError('a session name is 1 to 64 letters, digits, "_", "." or "-", starting with a letter or digit')
     if log:
         set_log(state, session, log)
+    # Asking again until the count is reached is the borrower's heartbeat meanwhile: a bench block can take minutes to grow.
+    for lease in held(state, session):
+        lease['heartbeat'] = now
     existing = next((r for r in state['requests'] if r['session'] == session), None)
     if existing:
         existing.update({'count': count, 'exclusive': exclusive, 'heartbeat': now, 'purpose': purpose or existing.get('purpose', '')})
@@ -183,7 +345,7 @@ def release(state, session, cores=None):
 
 
 def grant_when_idle(state, now, all_cores, containers=NOT_CHECKED):
-    """With no PluginCheck run going, requests are granted straight from the slots no lease holds. An exclusive request is also
+    """With no PluginCheck run going, requests are granted straight from the slots no lease holds, with no floor. An exclusive request is also
     held back by a stage of a full run, and, when containers (docker_names()) is given, by any running container the lease file
     does not know."""
     if owner_active(state, now):
@@ -201,16 +363,18 @@ def grant_when_idle(state, now, all_cores, containers=NOT_CHECKED):
     for cores in all_cores:
         if cores in taken:
             continue
-        borrower = next_borrower(state)
+        borrower = borrower_for(state, cores, all_cores, floor=False)
         if borrower is None:
-            break
+            continue
+        taken.add(cores)
         granted.append(grant(state, borrower, cores, now)['cores'])
     return granted
 
 
-def owner_free(state, cores, now):
-    """PluginCheck's server in these cores finished. Returns the lease if a borrower takes the slot, else None."""
-    borrower = next_borrower(state)
+def owner_free(state, cores, now, all_cores=None):
+    """PluginCheck's server in these cores finished. Returns the lease if a borrower takes the slot, else None. all_cores: the run's
+    slots (else the owner's, as saved), for the floor, which holds here since a run is going, and the bench blocks."""
+    borrower = borrower_for(state, cores, all_cores or (state.get('owner') or {}).get('cores'))
     return grant(state, borrower, cores, now) if borrower else None
 
 
@@ -485,7 +649,7 @@ class Owner:
 
     def free(self, cores):
         with Store(self.folder) as state:
-            lease = owner_free(state, cores, self.clock())
+            lease = owner_free(state, cores, self.clock(), self.all_cores)
             if lease:
                 self.lent.add(cores)
             return lease
@@ -570,9 +734,8 @@ class Lending:
 
 
 def machine_cores():
-    """The slots the behaviour stage makes: 2 logical cores each, from the cores Docker can use."""
-    count = int(os.environ.get('PLUGINCHECK_LEASE_CORES', os.cpu_count() or 2))
-    return [f'{first}-{first + 1}' for first in range(0, count - 1, 2)]
+    """The slots the behaviour stage makes: 2 logical cores each, from the cores Docker can use, leaving out the user's own."""
+    return make_slots(core_count(), reserved_cores())
 
 
 class Lane:

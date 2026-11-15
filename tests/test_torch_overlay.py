@@ -7,7 +7,8 @@ STAGES = os.path.normpath(os.path.join(HERE, '..', 'stages'))
 for path in (os.path.join(STAGES, 'behaviour'), STAGES):
     if path not in sys.path:
         sys.path.insert(0, path)
-import classification, extraplugins
+import classification, extraplugins, pin
+from unittest import mock
 
 SOURCE = os.path.join(STAGES, 'behaviour.py')
 CSPROJ = '''<Project Sdk="Microsoft.NET.Sdk">
@@ -50,6 +51,10 @@ class TorchZipTests(unittest.TestCase):
         open(os.path.join(self.source, 'TorchPlugin', 'manifest.xml'), 'w').write(MANIFEST)
         open(os.path.join(self.source, 'TorchPlugin', 'Plugin.cs'), 'w').write('class Plugin { }')
         self.calls = []
+        # The build's docker run takes pin.args(), which would ask Docker how many cores it has.
+        patch = mock.patch.object(pin, 'docker_cores', lambda: 32)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def docker(self, *args):
         self.calls.append(args)

@@ -65,6 +65,8 @@ def fake_leases():
 
     module.Lending = Lending
     module.Owner = lambda *args: None
+    # pin.args(): containers outside a slot are not pinned in a replay, and Docker is not asked how many cores it has.
+    module.reserved_cores = lambda: set()
     return module
 
 

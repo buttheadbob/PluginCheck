@@ -1,7 +1,7 @@
 """Borrow PluginCheck's server slots for in-game work: mod, Torch and similar fixes. Never for checking another plugin.
 
 usage:
-  python lease.py request   --session NAME [--count 1|2] [--purpose TEXT] [--exclusive] [--log PATH]
+  python lease.py request   --session NAME [--count 1-4] [--purpose TEXT] [--exclusive] [--log PATH]
   python lease.py heartbeat --session NAME [--log PATH]
   python lease.py release   --session NAME [--cores 4-5]
   python lease.py status
@@ -12,6 +12,14 @@ finishes, or at once when no PluginCheck run is going, so call request or heartb
 each container pinned to its lease: docker run --cpuset-cpus <cores> --name <container> ... The container name is
 <session>-<n>, never plugincheck-*. Call heartbeat at least every minute while working: a lease with none for 5 minutes ends.
 release when done. A session gets at most 2 slots, and at most 3 sessions borrow at once.
+
+No slot ever holds the user's own cores, 24-31 unless PLUGINCHECK_USER_RESERVED_CORES says otherwise ("" for none), so on a
+32-thread machine there are 12 slots. While a PluginCheck run is going, borrowers together get no slot past all but 4 of them:
+the run keeps at least 4, its pre-container lane's included. With no run going there is no such limit. A bench session, one whose name matches physbench-* (PLUGINCHECK_BENCH_SESSIONS, an fnmatch
+pattern), may ask for up to 4 slots, always on adjacent cores, and at most 3 bench sessions borrow at once, within the 3 sessions.
+Its first slot is granted only where the whole block fits, and each next one only next to it, so a block may arrive a slot at a
+time while a run's servers finish; while no such place exists it waits, and while the floor leaves less room it gets fewer
+(adjacent still). Its reply's cpuset is its cores together, for one container over the block, named after any of its leases.
 
 --exclusive asks for the whole machine, for measurements that need it quiet. PluginCheck starts no new server and no new Docker
 stage of a full run (each finishes the step it is on), nothing new is lent, and the lease (cores "all") is granted once nothing
@@ -53,6 +61,8 @@ def show(state, session=None, containers=leases.NOT_CHECKED, now=None):
     if waiting:
         running = (state.get('owner') or {}).get('servers', 0) if leases.owner_active(state, now) else 0
         shown['waitingFor'] = leases.exclusive_blockers(state, now, running, containers)
+    if session is not None:
+        shown['cpuset'] = leases.cpuset(leases.slot_cores(l['cores'] for l in shown['leases'] if not l.get('exclusive')))
     if session is None:
         shown['stages'] = leases.run_stages(state, now)
         if containers is not leases.NOT_CHECKED:
@@ -76,7 +86,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('action', choices=['request', 'heartbeat', 'release', 'status', 'gate'])
     parser.add_argument('--session')
-    parser.add_argument('--count', type=int, default=1, choices=[1, 2])
+    parser.add_argument('--count', type=int, default=1, choices=[1, 2, 3, 4], help='at most 2, or 4 for a bench session')
     parser.add_argument('--purpose', default='')
     parser.add_argument('--exclusive', action='store_true')
     parser.add_argument('--cores')
@@ -93,6 +103,9 @@ def main():
         parser.error('--session is required: 1 to 64 letters, digits, "_", "." or "-", starting with a letter or digit')
     if args.session == leases.LANE:
         parser.error(f"{leases.LANE} is PluginCheck's own pre-container lane, which check.py --pre runs")
+    if args.action == 'request' and not args.exclusive and args.count > leases.per_session(args.session):
+        parser.error(f'--count: {args.session} may borrow at most {leases.per_session(args.session)} slots; '
+                     f'up to {leases.BENCH_MAX_PER_SESSION} is for bench sessions ({os.environ.get("PLUGINCHECK_BENCH_SESSIONS", leases.BENCH_SESSIONS)})')
     names = leases.docker_names()  # read before the lock: nothing slow runs under it
     running_now = leases.running_check(names)
     with leases.Store() as state:

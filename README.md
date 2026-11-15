@@ -175,7 +175,7 @@ the same settings can share one. Writers go first, so the first command in each 
 command that changes something it does not declare, reruns alone before it is reported. The same reading says which settings each command can
 reach. With no current reading, every command gets its own server and every setting is flipped.
 
-Servers run side by side, as many as fit in Docker's cores and memory, each pinned to its own 2 logical cores. Measured on AutoStation, 16 servers
+Servers run side by side, as many as fit in Docker's cores and memory, each pinned to its own 2 logical cores, never the user's own (Lending slots to other sessions). Measured on AutoStation, 16 servers
 on 2 cores finished about 1.4 times faster than 8 on 4, with the same results.
 
 Each server's result is kept in `cache/behaviour`. It's found again by:
@@ -225,7 +225,28 @@ Every server prints one `timing` line in `behaviour.log` when its slot is freed.
 The behaviour stage runs its servers in slots of two logical cores each. Other sessions can borrow some of them for in-game work,
 such as mod or Torch fixes. They may not borrow them to check another plugin: that is a PluginCheck run.
 
-- A session borrows at most 2 slots, and at most 3 sessions borrow at once, so a run always keeps the rest.
+- **The user's own cores** are never in a slot: no PluginCheck server, no other PluginCheck container and no borrower runs on them.
+  They are `24-31` unless `PLUGINCHECK_USER_RESERVED_CORES` says otherwise, as a range or a list (`8,9,12-15`); empty means none. A
+  slot with either of its cores reserved is left out. On a 32-thread machine that leaves 12 slots, cores 0-23, where there were 16.
+  Containers outside a slot, such as a build or another stage's server, are pinned to the same cores (`stages/pin.py`), counted from
+  the cores Docker has (`docker info`), as the slots are: Docker Desktop can have fewer than the computer.
+- A session borrows at most 2 slots, and at most 3 sessions borrow at once.
+- **While a run is going**, borrowers together get no slot past all but 4, so the run keeps at least 4 (the pre-container lane's
+  included). With 12 slots and 3 sessions borrowing 2 each, it keeps 6 (5 for the run while the lane has one). **With no run going**
+  there is no such limit, and borrowers may take every slot. A run that starts then uses the slots left, and takes the others back as
+  their leases end; it never stops a borrower's container.
+- **Bench sessions**, those whose name matches `physbench-*` (`PLUGINCHECK_BENCH_SESSIONS`, an fnmatch pattern, case sensitive), may
+  borrow up to 4 slots each, always on adjacent cores (8 cores for 4 slots). At most 3 bench sessions borrow at once, and they count
+  among the 3 sessions. With no run going, three benches at 4 slots each take all 12. During a run two benches at 4 slots reach the
+  limit of 8, so a third then waits; three benches asking for less (such as 4, 2 and 2) all run.
+  - Its first slot is granted only where the whole block fits among slots no other session holds (PluginCheck's busy slots count, since
+    each comes free when its server ends), and each next slot only next to its block. With no run going the block is granted at once;
+    during a run it arrives a slot at a time as the neighbouring servers finish, and a slot next to a growing block goes to it first.
+  - No slot is lent to anyone where it would leave a growing block no room to finish.
+  - Where no place fits the whole block, because other leases split the slots, it waits. During a run, where the limit of 8 leaves less room than
+    it asked for, it gets fewer slots, still adjacent, and grows if room comes back.
+  - Its reply's `cpuset` is its cores together (such as `0-7`), so it can run one container over the block, named after any of its
+    leases. Its slots stay out of use until none of those containers runs.
 - A slot is handed over only when one of PluginCheck's servers finishes in it. A running server is never stopped. With no run
   going, a request is granted at once.
 - The borrower pins its container to the lease's cores and names it `<session>-<n>`, never `plugincheck-*`.
@@ -255,6 +276,7 @@ lock. Sessions use `lease.py`:
 
 ```
 python lease.py request   --session NAME --count 2 --purpose "mod fix test"
+python lease.py request   --session physbench-a --count 4 --purpose "physics bench"   # a bench session: 4 adjacent slots
 python lease.py heartbeat --session NAME        # at least every minute while working
 python lease.py release   --session NAME [--cores 4-5]
 python lease.py status
@@ -298,7 +320,8 @@ python check.py <target> --continue <run folder>
   of PluginCheck's own.
 - The slot is a lease as the session `plugincheck-pre` (`stages/leases.py`, `Lane`). It's granted when one of the running
   `behaviour` stage's servers finishes, or at once with no run going.
-- It counts against neither borrower limit, so with 3 sessions borrowing 2 slots each, a run keeps 16 - 6 - 1 = 9.
+- It counts against neither borrower limit, so with 3 sessions borrowing 2 slots each, a run on 12 slots keeps 12 - 6 - 1 = 5. It is
+  inside the 4 slots PluginCheck always keeps.
 - Every container the lane starts is pinned to the slot's cores (`stages/pin.py`).
 - An exclusive request makes the lane finish the stage it is on, give the slot back, and wait.
 - The slot goes back as soon as the lane's half ends.
@@ -374,6 +397,8 @@ Containers are not a hard security boundary. Do not run a plugin you would not t
 | `PLUGINCHECK_TORCH_IMAGE`, `PLUGINCHECK_LEGACY_IMAGE` | Use a different image |
 | `PLUGINCHECK_WORLD` | A save folder for `quasar_managed` to start from, in place of Star System, such as one with grids a plugin acts on, for a hand test with `--hold` |
 | `PULSAR_GITHUB_TOKEN` | A GitHub token, in place of `github-token.txt` |
+| `PLUGINCHECK_USER_RESERVED_CORES` | The user's own logical cores, never in a slot or a container's cpuset. The default is `24-31`; empty for none |
+| `PLUGINCHECK_BENCH_SESSIONS` | The fnmatch pattern of bench sessions, which may borrow 4 adjacent slots. The default is `physbench-*`; empty for none |
 
 ## Add a plugin
 Add `targets/<name>.json`. Leave out the sections the plugin does not have:

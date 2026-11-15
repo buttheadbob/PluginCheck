@@ -69,14 +69,19 @@ class PinTests(unittest.TestCase):
 
     def test_the_pin_follows_the_lane(self):
         saved = os.environ.pop('PLUGINCHECK_CPUSET', None)
+        reserved = os.environ.get('PLUGINCHECK_USER_RESERVED_CORES')
+        os.environ['PLUGINCHECK_USER_RESERVED_CORES'] = ''
         try:
-            self.assertEqual(pin.args(), [])
+            self.assertEqual(pin.args(), [], 'no lane and no reserved cores: not pinned')
             os.environ['PLUGINCHECK_CPUSET'] = '6-7'
             self.assertEqual(pin.args(), ['--cpuset-cpus', '6-7'])
         finally:
             os.environ.pop('PLUGINCHECK_CPUSET', None)
             if saved is not None:
                 os.environ['PLUGINCHECK_CPUSET'] = saved
+            os.environ.pop('PLUGINCHECK_USER_RESERVED_CORES')
+            if reserved is not None:
+                os.environ['PLUGINCHECK_USER_RESERVED_CORES'] = reserved
 
 
 class ContinueTests(unittest.TestCase):

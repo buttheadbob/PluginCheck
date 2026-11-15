@@ -156,8 +156,8 @@ def read_text(path):
 
 
 def capacity():
-    """How many servers fit side by side, and which logical cores each gets, from what Docker can really use. In the pre-container lane,
-    one server at a time on the lane's own slot."""
+    """How many servers fit side by side, and which logical cores each gets, from what Docker can really use less the user's own cores
+    (leases.USER_RESERVED_CORES), which no slot holds. In the pre-container lane, one server at a time on the lane's own slot."""
     if os.environ.get('PLUGINCHECK_CPUSET'):
         print(f"the pre-container lane: one server at a time, on cores {os.environ['PLUGINCHECK_CPUSET']}")
         slots = queue.Queue()
@@ -165,13 +165,17 @@ def capacity():
         return 1, slots
     info = docker('info', '--format', '{{.NCPU}} {{.MemTotal}}').stdout.split()
     cores, memory = (int(info[0]), int(info[1]) // 2 ** 30) if len(info) == 2 else (CORES_PER_SERVER, MEMORY_PER_SERVER_GIB)
-    fits = max(min(cores // CORES_PER_SERVER, int(memory / MEMORY_PER_SERVER_GIB)), 1)
+    reserved = {core for core in leases.reserved_cores() if core < cores}
+    usable = leases.make_slots(cores, reserved, CORES_PER_SERVER)
+    if not usable:
+        raise SystemExit(f'every logical core in Docker is reserved for the user ({leases.cpuset(reserved)}), so no server can run')
+    fits = max(min(len(usable), int(memory / MEMORY_PER_SERVER_GIB)), 1)
     workers = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_WORKERS', fits))
-    print(f'{cores} logical cores and {memory} GiB in Docker: {workers} servers at a time, {CORES_PER_SERVER} cores each')
+    kept = f', cores {leases.cpuset(reserved)} kept for the user' if reserved else ''
+    print(f'{cores} logical cores and {memory} GiB in Docker{kept}: {workers} servers at a time, {CORES_PER_SERVER} cores each')
     slots = queue.Queue()
     for i in range(workers):
-        first = (i * CORES_PER_SERVER) % max(cores - CORES_PER_SERVER + 1, 1)
-        slots.put(f'{first}-{first + CORES_PER_SERVER - 1}')
+        slots.put(usable[i % len(usable)])
     return workers, slots
 
 
