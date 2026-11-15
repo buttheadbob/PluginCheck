@@ -40,7 +40,7 @@ sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, 'behaviour'))
 import classification, containers, extraplugins, fixture, githubtoken, leases, repocopy, serverhash, startlog, timing as server_timing
 import pin
-from containers import BUILD_SECONDS, TIMED_OUT, copy, start_server
+from containers import BUILD_SECONDS, TIMED_OUT, copy, hand_in, start_server
 
 MAGNETAR = 'ghcr.io/cometworks/magnetar:latest'
 TORCH = os.environ.get('PLUGINCHECK_TORCH_IMAGE', 'plugincheck-torch-proton:latest')
@@ -68,9 +68,10 @@ CORES_PER_SERVER = int(os.environ.get('PLUGINCHECK_BEHAVIOUR_CORES', '2'))
 # A server settles near 1 GB and peaked at 0.95 GiB when measured. This leaves room for the compile and world load at the start of each one.
 MEMORY_PER_SERVER_GIB = 1.8
 DISCOVER_ONLY = bool(os.environ.get('PLUGINCHECK_BEHAVIOUR_DISCOVER_ONLY'))
-# Each server is the container plugincheck-behaviour-<the stage's process id>-<n>, with the volume of that name and -data (serve). Borrowed
-# slots' containers are named <session>-<n>, never this.
-SERVER_NAME = re.compile(r'plugincheck-behaviour-(\d+)-\d+(?:-data)?')
+# Each server is the container plugincheck-behaviour-<the stage's process id>-<n>, with the volume of that name and -data (serve). The run's
+# Magnetar download cache is the volume plugincheck-behaviour-<pid>-seed-<its content hash>, filled by the container of that name and -fill
+# (seed_volume). The clean-up and the start-up sweep remove all of these together. Borrowed slots' containers are named <session>-<n>, never this.
+SERVER_NAME = re.compile(r'plugincheck-behaviour-(\d+)-(?:\d+(?:-data)?|seed-[0-9a-f]+(?:-fill)?)')
 # Set once the stage is ending (interrupted, or leaving): run_server starts no server after it.
 ending = threading.Event()
 # The clean-up repeats its removal for up to this long, until two listings in a row find none of this stage's servers (remove_own_servers).
@@ -86,6 +87,8 @@ AGE_LIMIT = START_TIMEOUT + 5 * 60
 STALLED_WAIT = 'request_wait_answer'
 # Each server's container name and when it started, while it runs (serve), for the watchdog.
 watched, watched_lock = {}, threading.Lock()
+# The volume holding each Magnetar download cache, or None where it could not be filled (seed_volume).
+seed_volumes, seed_volumes_lock = {}, threading.Lock()
 
 sys.stdout.reconfigure(line_buffering=True)
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -394,7 +397,9 @@ def seed_magnetar(build, seed, folder):
     shutil.copytree(os.path.join(here, 'behaviour', 'probe'), probe_folder)
     name = build['plugin']
     shutil.copytree(build['source'], os.path.join(folder, 'source', name), ignore=shutil.ignore_patterns('.claude', '.git', 'bin', 'obj'))
-    if magnetar_cache and not legacy:
+    # What Magnetar downloaded comes from the run's volume where it could be filled, or else in this server's own seed.
+    cached = seed_volume() if magnetar_cache and not legacy else None
+    if magnetar_cache and not legacy and not cached:
         shutil.copytree(magnetar_cache, os.path.join(seed, 'Magnetar'), dirs_exist_ok=True)
     plugins = [(build['id'], name, build['manifest']), (PROBE_ID, PROBE, PROBE + '.xml')]
     # Other plugins a variant loads beside this one, each with its config written before the server starts.
@@ -439,14 +444,50 @@ def seed_magnetar(build, seed, folder):
     # Files a variant writes before start, such as an older config of the plugin under test.
     for relative, text in build.get('files', {}).items():
         write(os.path.join(seed, relative), text)
+    return cached
 
 
-def start_magnetar(build, seed, folder, container, volume, cores, node=False):
+def seed_volume():
+    """The run's Docker volume holding what Magnetar downloaded (magnetar_cache), or None when it could not be filled. Filled once, by the
+    first server that asks while the others wait for it, and mounted read-only into every Magnetar server, so each server's tar carries only
+    its own seed. Named by the cache's content, so a cache that changes gets a volume of its own."""
+    with seed_volumes_lock:
+        if magnetar_cache not in seed_volumes:
+            seed_volumes[magnetar_cache] = fill_seed_volume(magnetar_cache)
+        return seed_volumes[magnetar_cache]
+
+
+def fill_seed_volume(cache_folder):
+    """Makes the volume, and copies the cache into it through a container that is created and never started. None if any step fails:
+    each Magnetar server then gets the cache in its own tar, as before."""
+    volume = f'plugincheck-behaviour-{os.getpid()}-seed-{classification.folder_hash(cache_folder)[:12]}'
+    filler = volume + '-fill'
+    made = docker('volume', 'create', volume)
+    why = f'docker volume create failed: {made.stderr.strip()[-300:]}' if made.returncode else None
+    if not why:
+        created = docker('create', '--name', filler, '-v', f'{volume}:/cache', MAGNETAR)
+        why = f'docker create failed: {created.stderr.strip()[-300:]}' if created.returncode else hand_in(filler, work, {cache_folder: '/cache'})
+        # -v also drops the anonymous volume the image's own VOLUME /data gives it; the named cache volume stays.
+        docker('rm', '-f', '-v', filler, timeout=CLEAN_SECONDS)
+    if why:
+        print(f'  the Magnetar download cache could not be put in a volume, so each Magnetar server gets it in its own tar: {why}', flush=True)
+        docker('volume', 'rm', '-f', volume, timeout=CLEAN_SECONDS)
+        return None
+    print(f'  the Magnetar download cache is in the volume {volume}, mounted read-only into each Magnetar server', flush=True)
+    return volume
+
+
+def start_magnetar(build, seed, folder, container, volume, cores, node=False, cached=None):
+    """cached: the volume holding the Magnetar download cache (seed_volume), mounted read-only, since the server runs as root, and copied
+    into its data before its own seed."""
     # Even with Magnetar's downloads cached, each server still asks GitHub for a little, and a run of many servers uses up the anonymous limit.
     token_args, token_env = githubtoken.for_container()
+    from_cache = ['-v', f'{cached}:/magnetar-cache:ro'] if cached else []
+    first = 'mkdir -p /data/Magnetar && cp -r /magnetar-cache/. /data/Magnetar/ && ' if cached else ''
     return start_server(container, ['--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
                                     '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour', *(CLUSTER_NODE if node else []),
-                                    '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
+                                    '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', *from_cache,
+                                    MAGNETAR, '-c', f'{first}cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
                         folder, {seed: '/seed', os.path.join(folder, 'source'): '/plugin'}, token_env)
 
 
@@ -584,11 +625,11 @@ def serve(build, batch, save, probe_zip, cores, timing, free):
     volume = container + '-data'
     magnetar = build['host'] in ('magnetar', 'legacy')
     if magnetar:
-        seed_magnetar(build, seed, folder)
+        cached = seed_magnetar(build, seed, folder)
         if build['host'] == 'legacy':
             problem = start_legacy(seed, folder, container, volume, cores)
         else:
-            problem = start_magnetar(build, seed, folder, container, volume, cores, any(p.get('node') for p in batch))
+            problem = start_magnetar(build, seed, folder, container, volume, cores, any(p.get('node') for p in batch), cached)
         instance, info = '/data/Instance', '/data/Magnetar/info.log'
     else:
         seed_torch(build, seed, folder, probe_zip)

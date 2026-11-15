@@ -166,7 +166,11 @@ plugin does and records the result. It needs nothing written by a person, and ru
 
    No server holds a folder of this computer while it runs. Each one is made with `docker create`, its seed and plugin files are copied in
    with `docker cp` as one tar (owned by root, readable by all, as the read-only mounts were before), and then it starts. A `hand-in` line
-   in `behaviour.log` gives each tar's size and the seconds spent building and copying it. Its logs and record
+   in `behaviour.log` gives each tar's size and the seconds spent building and copying it. What Magnetar downloaded (about 76 MB) is not in
+   each Magnetar server's tar: it is copied once into a Docker volume of the run, named by its content
+   (`plugincheck-behaviour-<pid>-seed-<hash>`), and mounted read-only into every Magnetar server, which copies it into its own data before
+   its seed. The volume is removed with the run's servers at the end, on an interrupt and on a stall stop, and by the start-up sweep if the
+   run that made it is gone. If it cannot be filled, each Magnetar server gets the cache in its own tar, as before. Its logs and record
    are copied out the same way. When Docker Desktop's file sharing stalled, servers that kept mounted folders open waited on them for good,
    could not be killed or removed, and piled up. Every docker call this stage makes has a time limit, and each copy in or out is tried
    twice and gives its reason if it still fails. A server that could not get its files ends as `not started`, with that reason.

@@ -259,7 +259,7 @@ class DepthGuardTests(unittest.TestCase):
                     mount = items[i + 1]
                     first = mount.values[0] if isinstance(mount, ast.JoinedStr) else mount
                     volume = (isinstance(first, ast.Constant) and str(first.value).startswith('plugincheck-')) or \
-                             (isinstance(first, ast.FormattedValue) and ast.unparse(first.value) in ('volume', 'v', 'ds_volume') or
+                             (isinstance(first, ast.FormattedValue) and ast.unparse(first.value) in ('volume', 'v', 'ds_volume', 'cached') or
                               isinstance(first, ast.FormattedValue) and ast.unparse(first.value).startswith('VOLUMES['))
                     if volume:
                         continue
