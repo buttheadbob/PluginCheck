@@ -95,7 +95,7 @@ class Replay:
 
     # ---- what replaces the outside world ----
 
-    def docker(self, *args):
+    def docker(self, *args, **options):
         return types.SimpleNamespace(returncode=0, stdout='', stderr='')
 
     def capacity(self):

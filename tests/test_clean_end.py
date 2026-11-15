@@ -66,7 +66,7 @@ class FakeDocker:
     def __init__(self, containers, volumes):
         self.containers, self.volumes, self.calls = containers, volumes, []
 
-    def __call__(self, *args):
+    def __call__(self, *args, **options):
         self.calls.append(args)
         out = types.SimpleNamespace(returncode=0, stdout='', stderr='')
         if args[0] == 'ps':
@@ -84,7 +84,7 @@ class FakeDocker:
 
 
 def removal_functions(docker, alive=lambda pid: True):
-    wanted = ('SERVER_NAME', 'END_SECONDS', 'ending', 'remove_servers', 'remove_own_servers', 'remove_abandoned_servers')
+    wanted = ('SERVER_NAME', 'END_SECONDS', 'CLEAN_SECONDS', 'ending', 'remove_servers', 'remove_own_servers', 'remove_abandoned_servers')
     parts = lifted(wanted)
     namespace = {'os': os, 're': __import__('re'), 'threading': threading, 'time': time, 'docker': docker,
                  'leases': types.SimpleNamespace(process_alive=alive)}
@@ -116,7 +116,7 @@ class OwnServersTests(unittest.TestCase):
         """On a console close check.py, which reads the stage's output, may have ended first: every write then fails."""
         me = os.getpid()
         docker = FakeDocker([server(me, 1), server(me, 2)], [server(me, 1, True)])
-        wanted = ('SERVER_NAME', 'END_SECONDS', 'ending', 'remove_servers', 'remove_own_servers', 'say_safely', 'interrupt_lock', 'interrupted')
+        wanted = ('SERVER_NAME', 'END_SECONDS', 'CLEAN_SECONDS', 'ending', 'remove_servers', 'remove_own_servers', 'say_safely', 'interrupt_lock', 'interrupted')
 
         class Ended(Exception):
             pass
@@ -146,7 +146,7 @@ class OwnServersTests(unittest.TestCase):
             """The first two listings fail, as with Docker busy or restarting."""
             refused = 0
 
-            def __call__(self, *args):
+            def __call__(self, *args, **options):
                 out = super().__call__(*args)
                 if args[0] == 'ps' and self.refused < 2:
                     self.refused += 1
@@ -177,7 +177,7 @@ calls, ready = sys.argv[1], sys.argv[2]
 gone = set()
 
 
-def docker(*args):
+def docker(*args, **options):
     with open(calls, 'a', encoding='utf-8') as f:
         f.write(json.dumps(args) + '\n')
     if args[:2] == ('rm', '-f'):
@@ -200,10 +200,10 @@ with concurrent.futures.ThreadPoolExecutor(1) as pool:
     for future in concurrent.futures.as_completed([pool.submit(time.sleep, 120)]):
         pass
 '''
-        parts = lifted(('SERVER_NAME', 'END_SECONDS', 'ending', 'remove_servers', 'remove_own_servers', 'say_safely', 'interrupt_lock', 'interrupted'),
-                       main_block=True)
-        self.assertEqual(len(parts), 9, 'behaviour.py has the server name, the time limit, the event, the two removals, the safe print, the lock, '
-                                        'the handler and its registration')
+        parts = lifted(('SERVER_NAME', 'END_SECONDS', 'CLEAN_SECONDS', 'ending', 'remove_servers', 'remove_own_servers', 'say_safely', 'interrupt_lock',
+                        'interrupted'), main_block=True)
+        self.assertEqual(len(parts), 10, 'behaviour.py has the server name, the two time limits, the event, the two removals, the safe print, the '
+                                         'lock, the handler and its registration')
         script = os.path.join(folder, 'stage.py')
         with open(script, 'w', encoding='utf-8') as f:
             f.write(prelude + '\n\n'.join(parts) + '\n' + block)
@@ -249,7 +249,7 @@ class EndingTests(unittest.TestCase):
 
         class Starting(FakeDocker):
             """A server whose docker run was under way: it is listed only after the first listing."""
-            def __call__(self, *args):
+            def __call__(self, *args, **options):
                 out = super().__call__(*args)
                 if args[0] == 'ps' and not hasattr(self, 'appeared'):
                     self.appeared = True

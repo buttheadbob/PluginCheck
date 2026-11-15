@@ -33,19 +33,22 @@ class ReplayTests(unittest.TestCase):
 class LiftedServe(unittest.TestCase):
     """serve() lifted out of behaviour.py, with Docker and the server start replaced."""
 
-    def serve(self, host, answers, marker_after=None, stall=600, start_timeout=20, kill_fails=False):
-        """answers: what each Docker check prints, in turn, or a function giving it."""
+    def serve(self, host, answers, record_after=None, stall=600, start_timeout=20, kill_fails=False):
+        """answers: what each Docker check prints, in turn, or a function giving it. record_after: the check finds the record from then on."""
         tree = ast.parse(open(SOURCE, encoding='utf-8').read())
-        wanted = {'serve', 'write', 'read_text', 'container_log'}
+        wanted = {'serve', 'write', 'read_text', 'container_log', 'copy'}
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
         work = replay.folder()
         calls, ended, written = [], [], []
+        began = time.time()
 
-        def docker(*args):
+        def docker(*args, **options):
             calls.append(args)
             out = types.SimpleNamespace(returncode=0, stdout='', stderr='')
             if args[0] == 'exec':
                 said = answers() if callable(answers) else answers.pop(0) if answers else ''
+                if record_after is not None and time.time() - began >= record_after:
+                    said = 'recorded'
                 if said == 'ENDED':
                     ended.append(True)
                     said = ''
@@ -62,20 +65,14 @@ class LiftedServe(unittest.TestCase):
             return out
 
         def start(*args):
-            folder = args[2] if host != 'legacy' else args[1]
-            if marker_after is not None:
-                def later():
-                    time.sleep(marker_after)
-                    with open(os.path.join(folder, 'marker', 'probe.json'), 'w', encoding='utf-8') as f:
-                        f.write('{}')
-                    written.append(True)
-                threading.Thread(target=later, daemon=True).start()
+            return None
 
         namespace = {'os': os, 'shutil': shutil, 'json': json, 're': re, 'glob': __import__('glob'), 'time': time, 'docker': docker,
                      'counter': itertools.count(1), 'work': work, 'scenario_file': lambda build, batch: 'mode=run\n', 'START_TIMEOUT': start_timeout, 'stall_limit': lambda batch: stall, 'options': {},
                      'CHECK_SECONDS': 1, 'startlog': startlog, 'remember_magnetar_cache': lambda folder: None,
                      'seed_magnetar': lambda *a: None, 'seed_torch': lambda *a: None, 'start_magnetar': start, 'start_legacy': start,
-                     'start_torch': start}
+                     'start_torch': start, 'contextlib': __import__('contextlib'), 'watched': {}, 'watched_lock': threading.Lock(), 'TIMED_OUT': 124,
+                     'LOOK_SECONDS': 30, 'CLEAN_SECONDS': 30, 'COPY_SECONDS': 120, 'COPY_TRIES': 2}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), SOURCE, 'exec'), namespace)
         save = os.path.join(work, 'save')
         os.makedirs(save)
@@ -155,21 +152,15 @@ class RunningTests(unittest.TestCase):
 
 
 class WaitTests(LiftedServe):
-    def test_the_marker_is_seen_without_asking_docker_again(self):
-        records, calls, freed, timing = self.serve('magnetar', [], marker_after=0.3)
-        self.assertEqual(records[0]['state'], 'recorded')
-        self.assertLessEqual(sum(1 for c in calls if c[0] in ('exec', 'inspect')), 2)
-        self.assertLess(timing['stopped'] - timing['up'], 0.95)
-
     def test_the_slot_goes_back_right_after_the_kill(self):
-        records, calls, freed, timing = self.serve('magnetar', [], marker_after=0.1)
+        records, calls, freed, timing = self.serve('magnetar', [], record_after=0)
         kill = next(i for i, c in enumerate(calls) if c[0] == 'kill')
         self.assertEqual(freed, [kill + 1])
         self.assertTrue(any(c[0] == 'cp' for c in calls[kill + 1:]))
         self.assertLess(timing['freed'] if 'freed' in timing else timing['killed'], timing['cleaned'])
 
     def test_a_container_still_running_after_its_kill_keeps_its_cores(self):
-        records, calls, freed, timing = self.serve('magnetar', [], marker_after=0.1, kill_fails=True)
+        records, calls, freed, timing = self.serve('magnetar', [], record_after=0, kill_fails=True)
         self.assertEqual(freed, [], 'the cores went back while the container still ran')
         self.assertEqual(records[0]['state'], 'recorded')
 
@@ -195,21 +186,6 @@ class WaitTests(LiftedServe):
         self.assertEqual(records[0]['state'], 'exited')
         self.assertEqual([c[0] for c in calls[:4]], ['exec', 'inspect', 'exec', 'inspect'])
 
-    def test_the_marker_folder_is_mounted_where_the_probe_looks(self):
-        source = open(SOURCE, encoding='utf-8').read()
-        # Beside the instance folder, never inside it: a mount there makes Docker create the instance folder as root, and Torch and Legacy
-        # run as a user, so their servers could not write their own instance.
-        for function, target in (('start_magnetar', '/data/marker'), ('start_legacy', '/data/marker'), ('start_torch', '/run-data/marker')):
-            body = source[source.index(f'def {function}('):]
-            body = body[:body.index('\ndef ', 1)]
-            self.assertIn(f'{{os.path.join(folder, "marker")}}:{target}\'', body, function)
-            self.assertNotIn('Instance/marker', body, function)
-        probe = open(os.path.join(replay.STAGES, 'behaviour', 'probe', 'src', 'Probe.cs'), encoding='utf-8').read()
-        finish = probe[probe.index('private void Finish(string json)'):]
-        finish = finish[:finish.index('MyLog.Default.WriteLineAndConsole("PROBE done")')]
-        self.assertLess(finish.index('"probe.json"), json);'), finish.index('Path.GetDirectoryName(MyFileSystem.UserDataPath'))
-        self.assertIn('"marker");', finish)
-        self.assertIn('catch (Exception e)', finish)
 
 
 if __name__ == '__main__':

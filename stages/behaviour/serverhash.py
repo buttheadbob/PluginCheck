@@ -15,7 +15,7 @@ ROOTS = ('serve', 'scenario_file', 'copy_world_files', 'build_torch_probe')
 # Values set while the stage runs. What they hold reaches the key another way (the build's fingerprint, the target's options in job_key,
 # the world and probe through ROOTS), or does not shape a result (folders, counters, locks and lending).
 DATA = {'work', 'here', 'repo', 'target', 'run_dir', 'result_path', 'cache', 'counter', 'options', 'extra', 'magnetar_cache',
-        'magnetar_cache_lock', 'slots', 'lending', 'running', 'running_lock'}
+        'magnetar_cache_lock', 'slots', 'lending', 'running', 'running_lock', 'watched', 'watched_lock'}
 MODULES = (os.path.join('behaviour', 'fixture.py'), os.path.join('behaviour', 'programmable.py'), os.path.join('behaviour', 'drilling.py'),
            os.path.join('behaviour', 'extraplugins.py'), 'startlog.py')
 FOLDERS = (os.path.join('behaviour', 'probe'), os.path.join('behaviour', 'torchprobe'))

@@ -31,7 +31,7 @@ class PinTests(unittest.TestCase):
                 if not items:
                     continue
                 first = [a.value if isinstance(a, ast.Constant) else None for a in items[:2]]
-                if (isinstance(node, ast.Call) and first[:1] == ['run'] and getattr(node.func, 'id', '') == 'docker') or \
+                if (isinstance(node, ast.Call) and first[:1] == ['run'] and getattr(node.func, 'id', '') in ('docker', 'docker_long')) or \
                         (isinstance(node, ast.List) and first == ['docker', 'run']):
                     segment = ast.get_source_segment(text, node)
                     if 'pin.args()' not in segment and '--cpuset-cpus' not in segment:
@@ -40,6 +40,72 @@ class PinTests(unittest.TestCase):
             for number, line in enumerate(text.splitlines(), 1):
                 if 'docker run' in line and not line.lstrip().startswith(('#', '"', "'")) and 'docker run --cpuset-cpus' not in line:
                     open_sites.append(f'{os.path.relpath(path, ROOT)}:{number} (text)')
+        self.assertEqual(open_sites, [])
+
+    def test_every_container_that_starts_is_pinned(self):
+        """Servers are made with docker create and then started (start_server), so a create whose container starts must be pinned as a
+        docker run is. A container created and never started, to copy files out of an image or into a volume, runs nothing. A function that
+        creates from options it is given and starts the container is checked where it is called, on the argument that carries them."""
+        def verb(node, word):
+            items = node.args if isinstance(node, ast.Call) else node.elts if isinstance(node, ast.List) else None
+            if not items:
+                return False
+            first = [a.value if isinstance(a, ast.Constant) else None for a in items[:2]]
+            return (isinstance(node, ast.Call) and first[:1] == [word] and getattr(node.func, 'id', '') in ('docker', 'docker_long')) or \
+                (isinstance(node, ast.List) and first == ['docker', word])
+
+        def pinned(text, node):
+            segment = ast.get_source_segment(text, node)
+            return 'pin.args()' in segment or '--cpuset-cpus' in segment
+
+        def scopes(tree):
+            """{function or module: the nodes directly in it, not in a function inside it}"""
+            found = {}
+
+            def mark(node, scope):
+                for child in ast.iter_child_nodes(node):
+                    found.setdefault(scope, []).append(child)
+                    mark(child, child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope)
+            mark(tree, tree)
+            return found
+
+        files = {}
+        for path in python_files():
+            with open(path, encoding='utf-8') as f:
+                files[path] = f.read()
+        open_sites, passing_on, starts = [], {}, 0
+        for path, text in files.items():
+            for scope, nodes in scopes(ast.parse(text)).items():
+                started = [n for n in nodes if verb(n, 'start')]
+                if not started:
+                    continue
+                starts += len(started)
+                created = [n for n in nodes if verb(n, 'create')]
+                if not created:
+                    open_sites.append(f'{os.path.relpath(path, ROOT)}:{started[0].lineno} starts a container it did not create')
+                parameters = [a.arg for a in scope.args.args] if hasattr(scope, 'args') else []
+                for node in created:
+                    if pinned(text, node):
+                        continue
+                    items = node.args if isinstance(node, ast.Call) else node.elts
+                    given = [i.value.id for i in items if isinstance(i, ast.Starred) and isinstance(i.value, ast.Name) and i.value.id in parameters]
+                    if given:
+                        passing_on[scope.name] = (parameters.index(given[0]), given[0])
+                    else:
+                        open_sites.append(f'{os.path.relpath(path, ROOT)}:{node.lineno}')
+        calls = 0
+        for path, text in files.items():
+            for node in ast.walk(ast.parse(text)):
+                name = getattr(node, 'func', None)
+                name = getattr(name, 'id', None) or getattr(name, 'attr', None)
+                if not isinstance(node, ast.Call) or name not in passing_on:
+                    continue
+                index, keyword = passing_on[name]
+                options = node.args[index] if len(node.args) > index else next((k.value for k in node.keywords if k.arg == keyword), None)
+                calls += 1
+                if options is None or not pinned(text, options):
+                    open_sites.append(f'{os.path.relpath(path, ROOT)}:{node.lineno} ({name})')
+        self.assertTrue(starts and calls, 'no container start found: this test no longer sees how servers start')
         self.assertEqual(open_sites, [])
 
     def test_a_file_that_pins_imports_pin(self):

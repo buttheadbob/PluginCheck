@@ -15,10 +15,11 @@ import serverhash
 SOURCE = os.path.join(STAGES, 'behaviour.py')
 SERVER = {'serve', 'scenario_file', 'seed_magnetar', 'start_magnetar', 'start_legacy', 'seed_torch', 'start_torch', 'dedicated_config',
           'remember_magnetar_cache', 'copy_world_files', 'build_torch_probe', 'START_TIMEOUT', 'MEMORY_PER_SERVER_GIB', 'CLUSTER_NODE', 'VOLUMES',
-          'MAGNETAR', 'TORCH', 'LEGACY', 'PROBE', 'PROBE_ID', 'TORCH_PROBE_ID', 'NO_CRASH_REPORTS'}
+          'MAGNETAR', 'TORCH', 'LEGACY', 'PROBE', 'PROBE_ID', 'TORCH_PROBE_ID', 'NO_CRASH_REPORTS', 'start_server', 'hand_in', 'readable', 'copy', 'docker'}
 ORCHESTRATION = {'generate', 'command_lines', 'argument', 'runs_on', 'fits', 'compare', 'take', 'differences', 'disagreements', 'replies_of', 'touched',
                  'changes', 'undeclared', 'run_server', 'run_with_retry', 'run_and_remember', 'run_and_remember_discovery', 'remembered', 'job_key',
-                 'kept', 'discover', 'note_arguments', 'capacity', 'keep_lending', 'clock', 'IDLE_SECONDS', 'COMPARED', 'REPEATS', 'CORES_PER_SERVER'}
+                 'kept', 'discover', 'note_arguments', 'capacity', 'keep_lending', 'clock', 'IDLE_SECONDS', 'COMPARED', 'REPEATS', 'CORES_PER_SERVER',
+                 'watch_servers', 'waiting_on_a_share', 'stop_stalled', 'WATCH_SECONDS', 'AGE_LIMIT'}
 
 
 def source():

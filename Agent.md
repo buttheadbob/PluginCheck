@@ -27,6 +27,8 @@ A `behaviour` run can take hundreds of servers, so make sure it will work before
    run everything.
 4. `behaviour` stops by itself as `not run` if a working build can't be discovered, because the rest of the run couldn't compare it. Fix the reason
    it gives, then run it again. A published build left out doesn't stop the run, it only narrows the comparison.
+   `behaviour stopped: Docker stalled` (exit 1) means its watchdog stopped it: report the run as failed, never as a pass, say so first in
+   the report, and run it again once Docker answers.
 5. Changing what shapes a server throws away every saved server result: the server code in `behaviour.py` (`stages/behaviour/serverhash.py`
    says which), the fixture or the probes. Make those changes before a run, not between runs,
    and only when the user agrees.

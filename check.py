@@ -8,7 +8,7 @@ import argparse, atexit, contextlib, datetime, glob, hashlib, json, os, shutil, 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'stages'))
-from display import Display, STATUS_MARK, clock
+from display import Display, STALLED, STATUS_MARK, clock, stalled
 import classification, githubtoken, leases, mountdepth, prerun
 import pin
 
@@ -382,7 +382,11 @@ def run_stage(stage):
         finished_stages.add(stage)
         # Written after every stage, so finished results can be read while the rest runs.
         json.dump(results, open(results_path, 'w', encoding='utf-8'), indent=1)
-    display.stage_finished(stage, outcome['status'], f"{stage}: {outcome['status']} in {clock(seconds)}. About {left_text()}.")
+    if outcome.get('stalled'):
+        # A failure, never a quiet "not run": the panel, live.json and the exit code count it so.
+        display.stage_finished(stage, 'fail', f"FAILED  {stage} {STALLED} after {clock(seconds)}: {outcome.get('reason', '')}")
+    else:
+        display.stage_finished(stage, outcome['status'], f"{stage}: {outcome['status']} in {clock(seconds)}. About {left_text()}.")
 
 
 def interrupt(process):
@@ -497,4 +501,4 @@ display.close()
 print('\n===== summary =====')
 display.summary(results['stages'], path)
 print('AI operator: follow Agent.md. Read the code behind every lead and give each one a verdict. Never report a guess.')
-sys.exit(1 if stopping.is_set() or any(o['status'] == 'fail' for o in results['stages'].values()) else 0)
+sys.exit(1 if stopping.is_set() or stalled(results['stages']) or any(o['status'] == 'fail' for o in results['stages'].values()) else 0)

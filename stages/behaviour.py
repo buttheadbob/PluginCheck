@@ -31,7 +31,7 @@ In the pre-container lane (check.py --pre, README), PLUGINCHECK_BEHAVIOUR_DISCOV
 the scenarios are made, on the one slot PLUGINCHECK_CPUSET names, without acting as the owner of any slot. check.py --continue then runs it
 in full, and finds those discoveries in the results cache.
 """
-import atexit, concurrent.futures, contextlib, glob, hashlib, io, itertools, json, os, queue, re, shutil, signal, subprocess, sys, threading, time, urllib.request, zipfile
+import atexit, concurrent.futures, contextlib, glob, hashlib, io, itertools, json, os, queue, re, shutil, signal, subprocess, sys, tarfile, threading, time, urllib.request, zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -74,6 +74,22 @@ SERVER_NAME = re.compile(r'plugincheck-behaviour-(\d+)-\d+(?:-data)?')
 ending = threading.Event()
 # The clean-up repeats its removal for up to this long, until two listings in a row find none of this stage's servers (remove_own_servers).
 END_SECONDS = 10
+# Every docker call has a time limit. When Docker Desktop's file sharing stalls, a call can wait for good, and the stage with it. A call that
+# runs out gives TIMED_OUT and says so on stderr (docker). A copy into or out of a server is tried COPY_TRIES times (copy), a look inside one
+# (docker exec) gets LOOK_SECONDS, removing servers at the end CLEAN_SECONDS, and a build in a container BUILD_SECONDS.
+DOCKER_SECONDS = 120
+TIMED_OUT = 124
+COPY_SECONDS, COPY_TRIES = 120, 2
+LOOK_SECONDS = 30
+CLEAN_SECONDS = 30
+BUILD_SECONDS = 30 * 60
+# The stall watchdog (watch_servers) looks at each server once every WATCH_SECONDS. It stops the run when a server is older than AGE_LIMIT,
+# which serve() never lets one reach, or when the same process of a server waits on a file share (STALLED_WAIT) at two looks in a row.
+WATCH_SECONDS = 45
+AGE_LIMIT = START_TIMEOUT + 5 * 60
+STALLED_WAIT = 'request_wait_answer'
+# Each server's container name and when it started, while it runs (serve), for the watchdog.
+watched, watched_lock = {}, threading.Lock()
 
 sys.stdout.reconfigure(line_buffering=True)
 target = json.load(open(sys.argv[1], encoding='utf-8'))
@@ -93,8 +109,32 @@ magnetar_cache = None
 options = target.get('behaviour', {})
 
 
-def docker(*args):
-    return subprocess.run(['docker', *args], capture_output=True, text=True, encoding='utf-8', errors='replace')
+def docker(*args, timeout=DOCKER_SECONDS, stdin=None, env=None):
+    try:
+        return subprocess.run(['docker', *args], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout, stdin=stdin, env=env)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(['docker', *args], TIMED_OUT, '', f'docker {args[0]} gave no answer in {timeout}s')
+
+
+def docker_long(*args):
+    """docker for a call that can take minutes: a build in a container, or a run whose image may have to be pulled first."""
+    return docker(*args, timeout=BUILD_SECONDS)
+
+
+def copy(*args, archive=None):
+    """docker cp, tried COPY_TRIES times with COPY_SECONDS each, from the tar file archive on stdin when given. Returns None, or why it
+    failed. A path or container that does not exist is an answer, so it is not tried again."""
+    for attempt in range(COPY_TRIES):
+        with open(archive, 'rb') if archive else contextlib.nullcontext() as given:
+            done = docker('cp', *args, timeout=COPY_SECONDS, stdin=given)
+        if done.returncode == 0:
+            return None
+        why = done.stderr.strip()[-300:] or f'exit code {done.returncode}'
+        if 'Could not find the file' in why or 'No such container' in why:
+            break
+        if attempt + 1 < COPY_TRIES:
+            time.sleep(2)
+    return f"docker cp {' '.join(a for a in args if a != '-')} failed: {why}"
 
 
 def finish(status, **fields):
@@ -109,13 +149,13 @@ def remove_servers(stage_ended):
     containers removed, or None when Docker could not list them."""
     def wanted(names):
         return [n for n in names.split() if (m := SERVER_NAME.fullmatch(n)) and stage_ended(int(m.group(1)))]
-    listed = docker('ps', '-a', '--format', '{{.Names}}')
+    listed = docker('ps', '-a', '--format', '{{.Names}}', timeout=CLEAN_SECONDS)
     containers = wanted(listed.stdout)
     if containers:
-        docker('rm', '-f', '-v', *containers)
-    volumes = wanted(docker('volume', 'ls', '--format', '{{.Name}}').stdout)
+        docker('rm', '-f', '-v', *containers, timeout=CLEAN_SECONDS)
+    volumes = wanted(docker('volume', 'ls', '--format', '{{.Name}}', timeout=CLEAN_SECONDS).stdout)
     if volumes:
-        docker('volume', 'rm', *volumes)
+        docker('volume', 'rm', *volumes, timeout=CLEAN_SECONDS)
     return containers if listed.returncode == 0 else None
 
 
@@ -185,7 +225,7 @@ def copy_world_files():
     """The game's own saves that the fixture starts from."""
     out = os.path.join(work, 'world-source')
     os.makedirs(out, exist_ok=True)
-    done = docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '-v', f'{out}:/out', '--entrypoint', 'bash', SDK, '-c',
+    done = docker_long('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '-v', f'{out}:/out', '--entrypoint', 'bash', SDK, '-c',
                   'cp "/ds/Content/CustomWorlds/Empty World/"SANDBOX_0_0_0_.sbs "/ds/Content/CustomWorlds/Empty World/"Sandbox*.sbc /out/ && '
                   'cp "/ds/Content/CustomWorlds/Moon Base/PC/SANDBOX_0_0_0_.sbs" /out/moon.sbs && '
                   'cp "/ds/Content/CustomWorlds/Moon Base/PC/"*.vx2 /out/' +
@@ -205,14 +245,14 @@ def build_torch_probe():
     os.makedirs(libs, exist_ok=True)
     name = f'plugincheck-behaviour-libs-{os.getpid()}'
     docker('create', '--name', name, TORCH)
-    copied = docker('cp', f'{name}:/opt/torch/.', libs)
+    copied = copy(f'{name}:/opt/torch/.', libs)
     docker('rm', '-v', name)
-    if copied.returncode:
-        return None, 'could not copy the Torch libraries'
+    if copied:
+        return None, 'could not copy the Torch libraries: ' + copied
     source = os.path.join(work, 'probe-source')
     shutil.copytree(os.path.join(here, 'behaviour', 'torchprobe'), os.path.join(source, 'torchprobe'), dirs_exist_ok=True)
     shutil.copytree(os.path.join(here, 'behaviour', 'probe'), os.path.join(source, 'probe'), dirs_exist_ok=True)
-    made = docker('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{VOLUMES["torch"]}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
+    made = docker_long('run', *pin.args(), '--rm', '--cpus', '4', '--memory', '6g', '-v', f'{work}:/work', '-v', f'{VOLUMES["torch"]}:/ds:ro', '--entrypoint', 'bash', SDK, '-c',
                   'set -e; cd /work/probe-source/torchprobe; dotnet build -c Release -v q -nologo -p:LibFolder=/work/torch-libs '
                   '-p:GameFolder=/ds/DedicatedServer64 -o /work/probe-out >/work/probe-build.log 2>&1')
     dll = os.path.join(work, 'probe-out', PROBE + '.dll')
@@ -423,21 +463,68 @@ def seed_magnetar(build, seed, folder):
         write(os.path.join(seed, relative), text)
 
 
+def readable(info):
+    """A file handed in as the read-only mounts gave it before: owned by root, as docker cp makes it anyway, readable by everyone and
+    writable by root alone. Torch and Legacy run as the user server, and only read these."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = 'root'
+    info.mode = 0o755 if info.isdir() else 0o644
+    return info
+
+
+def hand_in(container, folder, files):
+    """Copies a server's files into its created container, as one tar through docker cp: files maps a folder here to a path in the
+    container. The folders above each path are in the tar too, so the copy needs nothing of the image. Returns None, or why it failed."""
+    archive = os.path.join(folder, 'hand-in.tar')
+    began = time.time()
+    try:
+        with tarfile.open(archive, 'w') as tar:
+            above = sorted({'/'.join(p[:i]) for p in (inside.strip('/').split('/') for inside in files.values()) for i in range(1, len(p))})
+            for name in above:
+                info = tarfile.TarInfo(name)
+                info.type = tarfile.DIRTYPE
+                tar.addfile(readable(info))
+            for source, inside in files.items():
+                tar.add(source, arcname=inside.strip('/'), filter=readable)
+        built, size = time.time(), os.path.getsize(archive)
+        why = copy('-', f'{container}:/', archive=archive)
+        # Measuring only, for what a server's start costs (README, Behaviour).
+        print(f'  hand-in {container}: {size / 2 ** 20:.1f} MB, tar {built - began:.1f}s, docker cp {time.time() - built:.1f}s', flush=True)
+        return why
+    finally:
+        # Also when the tar could not be built or sent: none is left behind in the folder.
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(archive)
+
+
+def start_server(container, create, folder, files, env=None):
+    """docker create, the server's files copied in (hand_in), then docker start. A running server holds no folder of this computer: when
+    Docker Desktop's file sharing stalled, servers that did waited on it for good, and could not be removed. Returns None, or why the server
+    did not start."""
+    made = docker('create', '--name', container, *create, env=env)
+    if made.returncode:
+        return f'docker create failed: {made.stderr.strip()[-300:]}'
+    why = hand_in(container, folder, files)
+    if why:
+        return f'its files could not be copied in: {why}'
+    started = docker('start', container)
+    return f'docker start failed: {started.stderr.strip()[-300:]}' if started.returncode else None
+
+
 def start_magnetar(build, seed, folder, container, volume, cores, node=False):
     # Even with Magnetar's downloads cached, each server still asks GitHub for a little, and a run of many servers uses up the anonymous limit.
     token_args, token_env = githubtoken.for_container()
-    subprocess.run(['docker', 'run', '-d', '--name', container, '--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
-                    '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour', *(CLUSTER_NODE if node else []),
-                    '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro', '-v', f'{os.path.join(folder, "marker")}:/data/marker',
-                    '-v', f'{os.path.join(folder, "source")}:/plugin:ro', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
-                   check=True, stdout=subprocess.DEVNULL, env=token_env)
+    return start_server(container, ['--user', '0:0', '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--entrypoint', 'bash', *token_args,
+                                    '-e', 'DS_DIR=/ds', '-e', 'DS_UPDATE=0', '-e', 'SERVER_NAME=PluginCheck behaviour', *(CLUSTER_NODE if node else []),
+                                    '-v', f'{VOLUMES["magnetar"]}:/ds', '-v', f'{volume}:/data', MAGNETAR, '-c', 'cp -r /seed/. /data/; exec tini -- magnetar-entrypoint'],
+                        folder, {seed: '/seed', os.path.join(folder, 'source'): '/plugin'}, token_env)
 
 
 def start_legacy(seed, folder, container, volume, cores):
     token_args, token_env = githubtoken.for_container()
-    subprocess.run(['docker', 'run', '-d', '--name', container, '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m',
-                    '--add-host', NO_CRASH_REPORTS, *token_args, '-v', f'{VOLUMES["legacy"]}:/ds', '-v', f'{volume}:/data', '-v', f'{seed}:/seed:ro',
-                    '-v', f'{os.path.join(folder, "marker")}:/data/marker', '-v', f'{os.path.join(folder, "source")}:/plugin:ro', LEGACY], check=True, stdout=subprocess.DEVNULL, env=token_env)
+    return start_server(container, ['--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--add-host', NO_CRASH_REPORTS, *token_args,
+                                    '-v', f'{VOLUMES["legacy"]}:/ds', '-v', f'{volume}:/data', LEGACY],
+                        folder, {seed: '/seed', os.path.join(folder, 'source'): '/plugin'}, token_env)
 
 
 def seed_torch(build, seed, folder, probe_zip):
@@ -474,9 +561,9 @@ def seed_torch(build, seed, folder, probe_zip):
 
 
 def start_torch(build, seed, folder, container, volume, cores):
-    subprocess.run(['docker', 'run', '-d', '--name', container, '--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--add-host', NO_CRASH_REPORTS, '-e', 'DS_UPDATE=0',
-                    '-v', f'{VOLUMES["torch"]}:/ds', '-v', f'{volume}:/run-data', '-v', f'{seed}:/seed/data:ro', '-v', f'{os.path.join(folder, "marker")}:/run-data/marker',
-                    '-v', f'{os.path.join(folder, "plugins")}:/seed/plugins:ro', TORCH], check=True, stdout=subprocess.DEVNULL)
+    return start_server(container, ['--cpuset-cpus', cores, '--memory', f'{int(MEMORY_PER_SERVER_GIB * 1024)}m', '--add-host', NO_CRASH_REPORTS, '-e', 'DS_UPDATE=0',
+                                    '-v', f'{VOLUMES["torch"]}:/ds', '-v', f'{volume}:/run-data', TORCH],
+                        folder, {seed: '/seed/data', os.path.join(folder, 'plugins'): '/seed/plugins'})
 
 
 def run_server(build, batch, save, probe_zip, queued=None):
@@ -563,87 +650,97 @@ def serve(build, batch, save, probe_zip, cores, timing, free):
     os.makedirs(seed)
     shutil.copytree(save, os.path.join(seed, 'Instance', 'Saves', 'Fixture'))
     write(os.path.join(seed, 'Instance', 'probe-scenario.txt'), scenario_file(build, batch))
-    # The probe copies its record here (Probe.cs, Finish), so the wait below sees it on this disk.
-    marker = os.path.join(folder, 'marker', 'probe.json')
-    os.makedirs(os.path.dirname(marker))
     container = f'plugincheck-behaviour-{os.getpid()}-{number}'
     volume = container + '-data'
     magnetar = build['host'] in ('magnetar', 'legacy')
     if magnetar:
         seed_magnetar(build, seed, folder)
         if build['host'] == 'legacy':
-            start_legacy(seed, folder, container, volume, cores)
+            problem = start_legacy(seed, folder, container, volume, cores)
         else:
-            start_magnetar(build, seed, folder, container, volume, cores, any(p.get('node') for p in batch))
+            problem = start_magnetar(build, seed, folder, container, volume, cores, any(p.get('node') for p in batch))
         instance, info = '/data/Instance', '/data/Magnetar/info.log'
     else:
         seed_torch(build, seed, folder, probe_zip)
-        start_torch(build, seed, folder, container, volume, cores)
+        problem = start_torch(build, seed, folder, container, volume, cores)
         instance, info = '/run-data/Instance', None
     timing['up'] = time.time()
-
-    # Asking Docker once a second for every server was up to 48 docker commands a second on a full run. Docker is asked every CHECK_SECONDS
-    # instead, for a record the copy missed, a Torch fatal error, or a server that ended.
-    # The same call says how much the server has logged, and its newest line, for the stall check below.
-    logs = '/data/Magnetar /data/Instance' if magnetar else '/run-data/Logs /run-data/Instance'
-    check = (f'if test -f {instance}/probe.json; then echo recorded; '
-             + ('' if magnetar else 'elif grep -qF "[FATAL]" /run-data/Logs/Torch-*.log 2>/dev/null; then echo fatal; ')
-             + f'else echo waiting; fi; logs=$(find {logs} -name "*.log" 2>/dev/null); '
-             'if [ -n "$logs" ]; then wc -c $logs | tail -n 1; tail -n 1 $(ls -t $logs | head -n 1); fi; true')
-    # A server that logs nothing for stall_limit() seconds, has no record and is not compiling has stopped: it ends as a timeout, and the run
-    # goes on.
-    limit = stall_limit(batch)
-    start, state, asked, logged, logged_at, stalled = time.time(), 'timeout', 0, None, time.time(), None
-    while time.time() - start < START_TIMEOUT:
-        if os.path.exists(marker):
-            state = 'recorded'
-            break
-        if time.time() - asked >= CHECK_SECONDS:
-            asked = time.time()
-            # Torch logs a fatal error and then hangs instead of exiting.
-            said = docker('exec', container, 'sh', '-c', check)
-            lines = said.stdout.splitlines()
-            if lines and lines[0].strip() in ('recorded', 'fatal'):
-                state = lines[0].strip()
-                break
-            if said.returncode and docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
-                state = 'exited'
-                break
-            if not said.returncode:
-                size, newest = (lines[1] if len(lines) > 1 else ''), (lines[2] if len(lines) > 2 else '')
-                if size != logged:
-                    logged, logged_at = size, time.time()
-                # Only once it has logged: a server still starting, with nothing in its log folders yet, is left to START_TIMEOUT.
-                elif logged and time.time() - logged_at >= limit and 'compil' not in newest.lower():
-                    stalled = int(time.time() - logged_at)
-                    print(f"  {timing['server']} wrote no log line for {stalled}s and has no record, so it ends as a timeout", flush=True)
+    # The stall watchdog (watch_servers) looks at it until it is removed.
+    with watched_lock:
+        watched[container] = timing['up']
+    try:
+        # Asking Docker once a second for every server was up to 48 docker commands a second on a full run. Docker is asked every CHECK_SECONDS
+        # instead, for the record, a Torch fatal error, or a server that ended.
+        # The same call says how much the server has logged, and its newest line, for the stall check below.
+        logs = '/data/Magnetar /data/Instance' if magnetar else '/run-data/Logs /run-data/Instance'
+        check = (f'if test -f {instance}/probe.json; then echo recorded; '
+                 + ('' if magnetar else 'elif grep -qF "[FATAL]" /run-data/Logs/Torch-*.log 2>/dev/null; then echo fatal; ')
+                 + f'else echo waiting; fi; logs=$(find {logs} -name "*.log" 2>/dev/null); '
+                 'if [ -n "$logs" ]; then wc -c $logs | tail -n 1; tail -n 1 $(ls -t $logs | head -n 1); fi; true')
+        # A server that logs nothing for stall_limit() seconds, has no record and is not compiling has stopped: it ends as a timeout, and the run
+        # goes on.
+        limit = stall_limit(batch)
+        start, state, asked, logged, logged_at, stalled = time.time(), 'not started' if problem else 'timeout', 0, None, time.time(), None
+        while not problem and time.time() - start < START_TIMEOUT:
+            if time.time() - asked >= CHECK_SECONDS:
+                asked = time.time()
+                # Torch logs a fatal error and then hangs instead of exiting.
+                said = docker('exec', container, 'sh', '-c', check, timeout=LOOK_SECONDS)
+                lines = said.stdout.splitlines()
+                if lines and lines[0].strip() in ('recorded', 'fatal'):
+                    state = lines[0].strip()
                     break
-        time.sleep(0.5)
-    seconds = int(time.time() - start)
-    timing['stopped'], timing['state'] = time.time(), state
-    # The record is written and the world is thrown away, so a clean shutdown only wastes the core. Torch ignores the signal under Proton
-    # and would sit out the whole timeout. Logs flush as they are written, so nothing is lost.
-    killed = docker('kill', container)
-    timing['killed'] = time.time()
-    # The cores go back now, unless the container still runs after all: then once it is removed below.
-    if killed.returncode == 0 or docker('inspect', '-f', '{{.State.Running}}', container).stdout.strip() != 'true':
-        free()
-    open(os.path.join(folder, 'container.log'), 'w', encoding='utf-8').write(container_log(container))
-    docker('cp', f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))
-    if magnetar:
-        docker('cp', f'{container}:/data/Magnetar/.', os.path.join(folder, 'magnetar'))
-        # The game's own log, where PluginSdk writes a standalone plugin's lines, Debug ones too (MagnetarLogSink). Without the save.
-        game = os.path.join(folder, 'instance')
-        docker('cp', f'{container}:{instance}/.', game)
-        shutil.rmtree(os.path.join(game, 'Saves'), ignore_errors=True)
-        shutil.rmtree(os.path.join(game, 'Backup'), ignore_errors=True)
-    else:
-        docker('cp', f'{container}:/run-data/Logs/.', os.path.join(folder, 'logs'))
-    docker('rm', '-f', '-v', container)
-    docker('volume', 'rm', volume)
+                # A look that got no answer says nothing about the server. A stalled Docker is the watchdog's to judge.
+                if said.returncode not in (0, TIMED_OUT):
+                    looked = docker('inspect', '-f', '{{.State.Running}}', container, timeout=LOOK_SECONDS)
+                    if looked.returncode != TIMED_OUT and looked.stdout.strip() != 'true':
+                        state = 'exited'
+                        break
+                if not said.returncode:
+                    size, newest = (lines[1] if len(lines) > 1 else ''), (lines[2] if len(lines) > 2 else '')
+                    if size != logged:
+                        logged, logged_at = size, time.time()
+                    # Only once it has logged: a server still starting, with nothing in its log folders yet, is left to START_TIMEOUT.
+                    elif logged and time.time() - logged_at >= limit and 'compil' not in newest.lower():
+                        stalled = int(time.time() - logged_at)
+                        print(f"  {timing['server']} wrote no log line for {stalled}s and has no record, so it ends as a timeout", flush=True)
+                        break
+            time.sleep(0.5)
+        seconds = int(time.time() - start)
+        timing['stopped'], timing['state'] = time.time(), state
+        # The record is written and the world is thrown away, so a clean shutdown only wastes the core. Torch ignores the signal under Proton
+        # and would sit out the whole timeout. Logs flush as they are written, so nothing is lost.
+        killed = docker('kill', container, timeout=LOOK_SECONDS)
+        timing['killed'] = time.time()
+        # The cores go back now, unless the container still runs after all, or Docker did not say: then once it is removed below.
+        looked = None if killed.returncode == 0 else docker('inspect', '-f', '{{.State.Running}}', container, timeout=LOOK_SECONDS)
+        if looked is None or (looked.returncode != TIMED_OUT and looked.stdout.strip() != 'true'):
+            free()
+        open(os.path.join(folder, 'container.log'), 'w', encoding='utf-8').write(container_log(container))
+        copied = [copy(f'{container}:{instance}/probe.json', os.path.join(folder, 'probe.json'))]
+        if magnetar:
+            copied.append(copy(f'{container}:/data/Magnetar/.', os.path.join(folder, 'magnetar')))
+            # The game's own log, where PluginSdk writes a standalone plugin's lines, Debug ones too (MagnetarLogSink). Without the save.
+            game = os.path.join(folder, 'instance')
+            copied.append(copy(f'{container}:{instance}/.', game))
+            shutil.rmtree(os.path.join(game, 'Saves'), ignore_errors=True)
+            shutil.rmtree(os.path.join(game, 'Backup'), ignore_errors=True)
+        else:
+            copied.append(copy(f'{container}:/run-data/Logs/.', os.path.join(folder, 'logs')))
+        # A path the server never wrote, such as the record of one that made none, is not a failed copy.
+        lost = [why if why and 'Could not find the file' not in why else None for why in copied]
+        for why in filter(None, lost):
+            print(f"  {timing['server']}: {why}", flush=True)
+    finally:
+        # Also when anything above raised: a server left running would go on using its cores, and an entry left on the watch would read as a
+        # stalled server once past AGE_LIMIT. Only a server Docker could not remove stays watched, since that one may really be stuck.
+        removed = docker('rm', '-f', '-v', container, timeout=CLEAN_SECONDS)
+        docker('volume', 'rm', volume, timeout=CLEAN_SECONDS)
+        if removed.returncode == 0 or 'No such container' in removed.stderr:
+            with watched_lock:
+                watched.pop(container, None)
     timing['cleaned'] = time.time()
     shutil.rmtree(seed, ignore_errors=True)
-    shutil.rmtree(os.path.dirname(marker), ignore_errors=True)
     shutil.rmtree(os.path.join(folder, 'source'), ignore_errors=True)
     shutil.rmtree(os.path.join(folder, 'plugins'), ignore_errors=True)
 
@@ -666,6 +763,10 @@ def serve(build, batch, save, probe_zip, cores, timing, free):
             record.update(json.load(open(path, encoding='utf-8')))
         except ValueError as e:
             record['failed'] = f'the probe wrote something unreadable: {e}'
+    elif problem:
+        record['failed'] = f'the server did not start: {problem}'
+    elif lost[0]:
+        record['failed'] = f'the server {state} after {seconds}s, and its record could not be copied out: {lost[0]}'
     elif not blocked:
         quiet = f', and wrote no log line for its last {stalled}s' if stalled else ''
         record['failed'] = f'the server {state} after {seconds}s with no record{quiet}. Last lines: {startlog.last_lines(text)[:400]}'
@@ -694,7 +795,7 @@ def tool_hash():
 
 
 def game_hash(host):
-    found = docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES[host]}:/ds:ro', '--entrypoint', 'sha256sum', SDK, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
+    found = docker_long('run', *pin.args(), '--rm', '-v', f'{VOLUMES[host]}:/ds:ro', '--entrypoint', 'sha256sum', SDK, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
     return found[0][:16] if found else 'unknown'
 
 
@@ -925,7 +1026,7 @@ def disagreements(first, second):
 
 if 'magnetar' not in target and 'torch' not in target:
     finish('not present', reason='this stage runs Magnetar and Torch plugins')
-if docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
+if docker_long('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'test', SDK, '-f', '/ds/DedicatedServer64/Sandbox.Game.dll').returncode:
     finish('not run', reason='no dedicated server yet. Run the magnetar stage first.')
 
 swept = remove_abandoned_servers()
@@ -968,6 +1069,72 @@ def interrupted():
         os._exit(1)
 
 
+def stop_stalled(reason):
+    """The watchdog's way out: the clean-up an interrupt does, then the reason as the stage's result. Docker has stalled, so going on would
+    only pile up servers that cannot be removed."""
+    ending.set()
+    with interrupt_lock:
+        say_safely(f'STALLED  {reason}. The run stops here and removes its servers.')
+        with contextlib.suppress(Exception):
+            remove_own_servers()
+        with contextlib.suppress(Exception):
+            lending.stop()
+        if result_path:
+            with contextlib.suppress(Exception), open(result_path, 'w', encoding='utf-8') as f:
+                json.dump({'status': 'not run', 'reason': f'stopped because Docker stalled: {reason}', 'stalled': True}, f, indent=1)
+        os._exit(1)
+
+
+# Each process of a server in state D (waiting in the kernel), as its pid, wchan and name, read from /proc inside the server.
+WAITING = ('for p in /proc/[0-9]*; do s=$(sed "s/.*) //" $p/stat 2>/dev/null | cut -d " " -f 1); '
+           '[ "$s" = D ] && echo "${p#/proc/} $(cat $p/wchan 2>/dev/null) $(cat $p/comm 2>/dev/null)"; done; true')
+
+
+def waiting_on_a_share(container):
+    """{pid: 'wchan name'} for each process of a server waiting on a file share (STALLED_WAIT), or None when Docker gave no answer or the
+    server is not running. A server that is gone leaves the watch."""
+    said = docker('exec', container, 'sh', '-c', WAITING, timeout=LOOK_SECONDS)
+    if said.returncode == TIMED_OUT:
+        say_safely(f'  watchdog: docker exec {container} gave no answer in {LOOK_SECONDS}s')
+    if 'No such container' in said.stderr:
+        with watched_lock:
+            watched.pop(container, None)
+    if said.returncode:
+        return None
+    found = {}
+    for line in said.stdout.splitlines():
+        pid, _, rest = line.strip().partition(' ')
+        if rest.split(' ')[0] == STALLED_WAIT:
+            found[pid] = rest
+    return found
+
+
+def watch_servers():
+    """The stall watchdog. Once every WATCH_SECONDS it looks at each server serve() has started and not yet removed, and stops the run
+    (stop_stalled) when one is older than AGE_LIMIT, or when the same process of one waits on a file share at two looks in a row. Each look
+    is one docker exec with a time limit, and the age needs no Docker at all, so a hung docker call never holds it up."""
+    seen = {}
+    while True:
+        time.sleep(WATCH_SECONDS)
+        try:
+            with watched_lock:
+                servers = dict(watched)
+            now = time.time()
+            for container, up in sorted(servers.items()):
+                if now - up > AGE_LIMIT:
+                    return stop_stalled(f'{container} has run for {int(now - up)}s, past the {AGE_LIMIT}s any server is given')
+            for container in sorted(servers):
+                found = waiting_on_a_share(container)
+                again = sorted(set(found or {}) & seen.get(container, set()))
+                if again:
+                    return stop_stalled(f'process {again[0]} ({found[again[0]]}) of {container} waits on a file share (state D, {STALLED_WAIT}) '
+                                        f'at two looks {WATCH_SECONDS}s apart')
+                seen[container] = set(found or {})
+            seen = {c: pids for c, pids in seen.items() if c in servers}
+        except Exception as error:
+            say_safely(f'  watchdog: {error!r}')
+
+
 # Not when a test replays this stage inside its own process.
 if __name__ == '__main__':
     if os.name == 'nt':
@@ -1002,11 +1169,12 @@ def keep_lending():
 
 
 threading.Thread(target=keep_lending, daemon=True).start()
+threading.Thread(target=watch_servers, daemon=True).start()
 save = copy_world_files()
 # The magnetar stage has already downloaded what Magnetar needs, so no server here has to ask GitHub for it again.
 # Failing that, what an earlier run kept for this game build.
 already = os.path.join(run_dir, 'data', 'Magnetar', 'GitHub')
-hashed = docker('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'sha256sum', MAGNETAR, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
+hashed = docker_long('run', *pin.args(), '--rm', '-v', f'{VOLUMES["magnetar"]}:/ds:ro', '--entrypoint', 'sha256sum', MAGNETAR, '/ds/DedicatedServer64/Sandbox.Game.dll').stdout.split()
 kept = os.path.normpath(os.path.join(here, '..', 'cache', 'magnetar-github', hashed[0][:16])) if hashed else ''
 for source in (already, kept):
     if source and os.path.isdir(source) and any(os.path.isdir(os.path.join(source, n, 'Bin')) for n in os.listdir(source)):
@@ -1058,7 +1226,7 @@ for build in builds:
         try:
             if spec is None:
                 raise KeyError(f'behaviour.plugins has no {host} entry for it')
-            extra[label, host] = (extraplugins.torch_plugin(spec, cache, work, docker, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch']) if host == 'torch'
+            extra[label, host] = (extraplugins.torch_plugin(spec, cache, work, docker_long, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch']) if host == 'torch'
                                   else extraplugins.magnetar_plugin(spec, cache))
         except (KeyError, OSError, RuntimeError, ET.ParseError) as e:
             finish('not run', reason=f"{build['name']} needs the plugin {label}, which could not be prepared: {e}")
@@ -1072,7 +1240,7 @@ for build in builds:
         shutil.copytree(build['overlay'], build['overlay_source'], dirs_exist_ok=True)
         try:
             build['zip'] = extraplugins.torch_zip(build['overlay_source'], os.path.dirname(target['torch']['project']), os.path.join(work, f"{build['name']}-zip"),
-                                                  docker, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch'])[0]
+                                                  docker_long, SDK, os.path.join(work, 'torch-libs'), VOLUMES['torch'])[0]
         except (OSError, RuntimeError, ET.ParseError, StopIteration) as e:
             finish('not run', reason=f"{build['name']}: its overlaid source could not be built: {e}")
         print(f"{build['name']}: built from the working source with {build['overlay']} laid over it", flush=True)

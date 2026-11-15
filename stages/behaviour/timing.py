@@ -6,8 +6,7 @@ borrower, right after the kill) and cleaned (logs copied, container and volume r
 from the game being ready to the record, and the game ticks in that time, so sim speed is game seconds per wall second (1.0 is full speed).
 
 Game ready is worked out from the probe's own span, back from the moment the record was seen, so the container's clock never has to agree
-with the host's. The record is seen within half a second of being written when the probe's copy reaches the mounted marker folder, and
-within behaviour.py's CHECK_SECONDS when only Docker finds it.
+with the host's. The record is seen within behaviour.py's CHECK_SECONDS of being written, when Docker is next asked.
 
 Nothing here changes what a server does or what is compared: compare() reads only "after", "before", "replies" and the like.
 """

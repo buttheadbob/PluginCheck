@@ -84,7 +84,9 @@ docker build --build-arg MAGNETAR_SHA256=<sha256> -t plugincheck-magnetar-legacy
 ```
 
 Each stage ends as `pass`, `fail`, `review` (a person or AI must read it), `not run`, `not present` or `unable to verify`.
-A stage that did not run is never a pass.
+A stage that did not run is never a pass. A behaviour stage stopped by its stall watchdog is `not run` with `stalled: true` in
+results.json; check.py shows it as `stopped: Docker stalled` in red, adds a `FAILED  behaviour stopped: Docker stalled` line under the
+summary, counts it as a failure on the live panel, and exits 1.
 
 **GitHub limit:** without a token GitHub allows 60 requests an hour. To raise that, put a token in `github-token.txt` beside `check.py`, which
 git ignores. Use a fine-grained token with read access to public repositories and nothing else, because a container that uses it also runs
@@ -158,10 +160,21 @@ plugin does and records the result. It needs nothing written by a person, and ru
    arguments filled in by type, which only reaches its first check, so it is listed as `NO EXAMPLE`.
 3. **Runs:** every scenario runs on every build it fits. Each server starts from a fresh copy of the world, and is killed as soon as the
    probe has its record. Its cores go back at the kill, and its logs are copied and its container removed while the next server starts.
-   The probe also copies its record into a small folder mounted from this computer, so the wait sees it without asking Docker. Docker is
-   asked every 5 seconds instead of every second, for a record the copy missed, a Torch fatal error, or a server that ended. A server
-   that writes no log line for 10 minutes, has no record and isn't compiling ends there as a timeout, with its last lines, instead of
-   waiting out the 20 minutes. The run goes on, and a scenario that itself waits longer in one go gets that long and a minute more.
+   Docker is asked every 5 seconds for the record, a Torch fatal error, or a server that ended. A server that writes no log line for 10
+   minutes, has no record and isn't compiling ends there as a timeout, with its last lines, instead of waiting out the 20 minutes. The run
+   goes on, and a scenario that itself waits longer in one go gets that long and a minute more.
+
+   No server holds a folder of this computer while it runs. Each one is made with `docker create`, its seed and plugin files are copied in
+   with `docker cp` as one tar (owned by root, readable by all, as the read-only mounts were before), and then it starts. A `hand-in` line
+   in `behaviour.log` gives each tar's size and the seconds spent building and copying it. Its logs and record
+   are copied out the same way. When Docker Desktop's file sharing stalled, servers that kept mounted folders open waited on them for good,
+   could not be killed or removed, and piled up. Every docker call this stage makes has a time limit, and each copy in or out is tried
+   twice and gives its reason if it still fails. A server that could not get its files ends as `not started`, with that reason.
+
+   A watchdog looks at each running server about every 45 seconds. It stops the run, removing its servers as an interrupt does, and gives
+   the reason as the stage's result, when a server has run 5 minutes past the 20-minute limit, which a server that is not stuck never
+   reaches, or when the same process in one waits on a file share (state D in `request_wait_answer`) at two looks in a row. Each look is
+   one `docker exec` with a time limit, and the age needs no Docker at all.
 4. **Compares:** the published build against each working build, and the working builds against each other.
 
 Published builds come from the repositories listed on MagnetarHub and QuasarHub, and from torchapi.com, into `cache/behaviour`. A plugin
@@ -373,7 +386,8 @@ reports.
 
 Tests are set up as a real server is: a Torch plugin's zip goes into Torch's own `Plugins` folder, and a loader compiles from
 its dev folder. Run data lives on Docker volumes. Mounted Windows folders only hand files in, partly because .NET under Wine,
-which Proton is built on, cannot load larger DLLs from them, and logs are copied out at the end.
+which Proton is built on, cannot load larger DLLs from them, and logs are copied out at the end. Behaviour servers, which run many at a
+time, get even their handed-in files by `docker cp` instead of a mount (see Behaviour).
 
 Our images are kept lean, and each removal was tested by loading a real server. They run as the `server` user, hold no setuid
 programs, and contain no download tools, since each download happens in a build stage that is thrown away. Log files are copied

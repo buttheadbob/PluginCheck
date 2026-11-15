@@ -31,6 +31,9 @@ LINE_COLOURS = ((re.compile(r'^=====.*'), BOLD + BLUE), (re.compile(r'^(DIFF|WAR
                 (re.compile(r'^\[\d+/\d+ '), DIM), (re.compile(r'^\s+\.\.\. '), DIM), (re.compile(r'^\S+: pass in\b'), GREEN),
                 (re.compile(r'^\S+: review in\b'), YELLOW), (re.compile(r'^\S+: (not run|unable to verify)\b'), MAGENTA))
 SERVER_ROWS = 8
+# A stage that stopped because Docker stalled (behaviour's watchdog) writes "not run" with stalled: true. It is shown and counted as a failure,
+# so a stalled run never reads as a pass (check.py's exit code too).
+STALLED = 'stopped: Docker stalled'
 ROOM_FOR_SERVERS = 30
 
 
@@ -52,6 +55,11 @@ def fit(parts, width):
         used += len(text)
         out.append(f'{colour}{text}{RESET}' if colour else text)
     return ''.join(out)
+
+
+def stalled(stages):
+    """The stages whose outcome says Docker stalled under them."""
+    return [stage for stage, outcome in stages.items() if outcome.get('stalled')]
 
 
 def can_draw():
@@ -184,10 +192,13 @@ class Display:
     def summary(self, stages, path):
         self.close()
         for stage, outcome in stages.items():
-            status = outcome['status']
+            status = STALLED if outcome.get('stalled') else outcome['status']
             reason = f" - {outcome['reason']}" if outcome.get('reason') else ''
-            colour = STATUS_COLOURS.get(status, '') if self.fancy else ''
+            colour = STATUS_COLOURS.get('fail' if outcome.get('stalled') else status, '') if self.fancy else ''
             print(f"{stage:10} {colour}{status}{RESET if colour else ''}{reason}")
+        for stage in stalled(stages):
+            colour = BOLD + RED if self.fancy else ''
+            print(f"{colour}FAILED  {stage} {STALLED}: this run is not a pass. Run it again once Docker answers.{RESET if colour else ''}")
         print(path)
 
     # ---- live.json ----

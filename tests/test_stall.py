@@ -42,7 +42,7 @@ class StallTests(LiftedServe):
 
     def test_a_server_that_keeps_logging_is_never_cut(self):
         sizes = itertools.count(100)
-        records, _, _, _ = self.serve('magnetar', lambda: f'waiting\n{next(sizes)} total\nstill going', marker_after=3.5, stall=2)
+        records, _, _, _ = self.serve('magnetar', lambda: f'waiting\n{next(sizes)} total\nstill going', record_after=3.5, stall=2)
         self.assertEqual(records[0]['state'], 'recorded')
 
     def test_a_server_that_has_not_logged_yet_is_left_to_the_start_limit(self):
