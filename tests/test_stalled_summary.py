@@ -2,6 +2,7 @@
 Run with: python -I -m unittest discover -s tests"""
 import ast, contextlib, io, os, sys, threading, types, unittest
 from unittest import mock
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

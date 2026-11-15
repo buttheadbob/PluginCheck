@@ -1,6 +1,7 @@
 """A plugin repository can junction or symlink a game or Torch install into its tree. Copies and walks of its source leave those
 folders out, so the install's files, its logs included, never reach a run. Run with: python -I -m unittest discover -s tests"""
 import ast, json, os, shutil, subprocess, sys, tempfile, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGES = os.path.normpath(os.path.join(HERE, '..', 'stages'))

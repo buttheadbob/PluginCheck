@@ -1,5 +1,6 @@
 """The folders a Quasar plugin's companions add to the code stages, without Docker: python -m unittest discover -s tests"""
 import json, os, shutil, sys, tempfile, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'stages'))
 import repocopy

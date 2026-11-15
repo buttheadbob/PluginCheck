@@ -27,11 +27,60 @@ and while a PluginCheck run is going. Runs themselves go one at a time from any 
 
 Everything lives in one JSON file, changed under a lock, so any session can use it from the command line (lease.py) and
 PluginCheck from Python. The decisions are plain functions of the state and the time, so they are tested without Docker.
+
+While the behaviour stage holds the owner entry, it also names its run there for a viewer of the file, such as a machine view: the run
+folder (run), what it is doing (stage) and its progress, the same numbers its live panel shows (OWNER_RUN_FIELDS). They go with the owner:
+when it stops, and when a stale owner is found.
 """
 import contextlib, fnmatch, json, os, re, threading, time, uuid
 
-# Shared by every session on the machine. PLUGINCHECK_MACHINE_DIR moves it, such as to a folder outside this checkout.
-FOLDER = os.environ.get('PLUGINCHECK_MACHINE_DIR') or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'machine')
+# A file in the checkout's root, kept out of git, naming the lease folder to share with other copies and sessions (machine_folder).
+MACHINE_DIR_FILE = 'machine-dir.txt'
+CHECKOUT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# Folders a process must not use as its lease folder, separated by os.pathsep. The test guard sets it (tests/scratchmachine.py), so a process
+# a test starts is refused too, whatever environment it was given.
+FORBIDDEN_ENV = 'PLUGINCHECK_MACHINE_DIR_FORBIDDEN'
+
+
+def same_folder(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def machine_folder(environ=os.environ, checkout=CHECKOUT):
+    """The lease folder: PLUGINCHECK_MACHINE_DIR when set (blank counts as unset); else the one absolute path in the checkout's
+    MACHINE_DIR_FILE; else the checkout's own machine folder. A file that is there but does not hold exactly one absolute path is refused
+    with ValueError, never passed over: a copy meant to share the machine's folder would otherwise run unseen in a folder of its own. A
+    folder FORBIDDEN_ENV lists is refused with ValueError too."""
+    folder = (environ.get('PLUGINCHECK_MACHINE_DIR') or '').strip()
+    if not folder:
+        path = os.path.join(checkout, MACHINE_DIR_FILE)
+        try:
+            with open(path, encoding='utf-8-sig') as file:
+                text = file.read()
+        except FileNotFoundError:
+            text = None
+        if text is None:
+            folder = os.path.join(checkout, 'machine')
+        else:
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if len(lines) != 1 or not os.path.isabs(lines[0]):
+                raise ValueError(f'{path} must hold one line, the absolute path of the lease folder to use; it holds {text[:200]!r}. '
+                                 f'Fix it or remove it (PLUGINCHECK_MACHINE_DIR, when set, is used instead).')
+            folder = lines[0]
+    for forbidden in filter(None, environ.get(FORBIDDEN_ENV, '').split(os.pathsep)):
+        if same_folder(folder, forbidden):
+            raise ValueError(f'the lease folder {folder} is refused here ({FORBIDDEN_ENV}); set PLUGINCHECK_MACHINE_DIR to another folder')
+    return folder
+
+
+# Every copy that names the same folder (PLUGINCHECK_MACHINE_DIR or MACHINE_DIR_FILE) sees the others' leases and runs. A lease folder that
+# cannot be worked out stops whatever opens the lease file, with the reason on one line (Store), and nothing before it: check.py --help works.
+try:
+    FOLDER, FOLDER_ERROR = machine_folder(), None
+except ValueError as error:
+    FOLDER, FOLDER_ERROR = None, str(error)
 MAX_PER_SESSION = 2
 # Bench sessions and the others together.
 MAX_SESSIONS = 3
@@ -63,6 +112,10 @@ IGNORED_CONTAINERS = ('buildx_buildkit_',)
 OWN_OWNER_STAGE = 'behaviour'
 # "The running containers were not read": the exclusive grant then looks only at the lease file, as before.
 NOT_CHECKED = object()
+# What the owner entry says about its run while it runs: the run folder, the stage and the progress ({done, total, left, ...}).
+OWNER_RUN_FIELDS = ('run', 'stage', 'progress')
+# How long a stage change or progress step waits for the lock. The next heartbeat writes it anyway, so the stage never waits long on it.
+REPORT_WAIT = 5
 
 
 def docker_names():
@@ -90,6 +143,49 @@ def empty():
 def owner_active(state, now):
     owner = state.get('owner')
     return bool(owner and owner.get('running') and now - owner.get('heartbeat', 0) <= OWNER_LIMIT)
+
+
+def drop_owner_run(owner):
+    for field in OWNER_RUN_FIELDS:
+        owner.pop(field, None)
+
+
+# The reason a run folder's stage gets when its owner's process went without cleaning up (end_run_folder).
+END_REASON = 'ended without cleaning up'
+# check.py rewrites live.json every second while it runs: one older than this has no writer left.
+LIVE_QUIET = 10
+
+
+def end_run_folder(run, now):
+    """Marks the run folder of an owner whose process is gone as ended, once, so a viewer does not show it running for ever: live.json
+    finished, its running stages not run, no time left and no servers; and, when there is none, a results.json with every stage not run, the
+    running ones for END_REASON. Only an absolute <yyyyMMdd-HHmmss> folder whose live.json says not finished and has not been rewritten for
+    LIVE_QUIET seconds (check.py may still be going). Best effort: True when marked, False on anything else, never an error."""
+    try:
+        if not (isinstance(run, str) and os.path.isabs(run) and re.fullmatch(r'[0-9]{8}-[0-9]{6}', os.path.basename(run))):
+            return False
+        with open(os.path.join(run, 'live.json'), encoding='utf-8') as file:
+            live = json.load(file)
+        if live.get('finished') is not False or now - live.get('updated', now) < LIVE_QUIET:
+            return False
+        stages = live.get('stages') or []
+        results = os.path.join(run, 'results.json')
+        if not os.path.exists(results):
+            started = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(live.get('started') or now))
+            outcome = {s['name']: {'status': 'not run', **({'reason': END_REASON} if s.get('state') == 'running' else {})} for s in stages}
+            with open(results, 'x', encoding='utf-8') as out:
+                json.dump({'target': live.get('target', ''), 'started': started, 'stages': outcome}, out, indent=1)
+        for stage in stages:
+            if stage.get('state') == 'running':
+                stage['state'] = 'not run'
+        live.update(finished=True, timeLeftSeconds=0, servers=[], updated=int(now))
+        temporary = os.path.join(run, 'live.json.tmp')
+        with open(temporary, 'w', encoding='utf-8') as out:
+            json.dump(live, out)
+        replace(temporary, os.path.join(run, 'live.json'))
+        return True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
 
 
 def exclusive_wanted(state):
@@ -276,8 +372,18 @@ def expire(state, now, container_running=lambda name: False, alive=None):
     does an owner that stopped beating, such as a behaviour stage that ended with no clean-up. Returns the cores that came back."""
     back = []
     alive = alive or process_alive
-    if state.get('owner') and state['owner'].get('running') and not owner_active(state, now):
-        state['owner']['running'] = False
+    owner = state.get('owner')
+    if owner and owner.get('run') and not alive(owner.get('pid')):
+        # Its run folder too, before the run is dropped: the process that would have ended it is gone.
+        end_run_folder(owner['run'], now)
+    if owner and not owner_active(state, now):
+        owner['running'] = False
+        # A stale owner's run, stage and progress are not true any more.
+        drop_owner_run(owner)
+    elif owner and any(field in owner for field in OWNER_RUN_FIELDS) and not alive(owner.get('pid')):
+        # Nor are those of an owner whose process is gone, such as one ended by a hard kill: they go at once, though the owner keeps
+        # counting as running until its heartbeat is OWNER_LIMIT old, as before.
+        drop_owner_run(owner)
     state['runs'] = [r for r in state.get('runs', []) if now - r.get('heartbeat', 0) <= OWNER_LIMIT and alive(r.get('pid'))]
     # A bench session may run one container over its whole block, named after any of its leases: each of its slots waits for all of them.
     blocks = {}
@@ -464,6 +570,8 @@ def run_may_begin(state):
 class Store:
     def __init__(self, folder=FOLDER, wait=60, save=True):
         """save=False only reads: the lock is taken and given back, and the file is left as it was."""
+        if folder is None:
+            raise SystemExit(f'the lease folder could not be worked out: {FOLDER_ERROR}')
         self.folder, self.wait, self.save = folder, wait, save
         self.path = os.path.join(folder, 'leases.json')
         self.lock = os.path.join(folder, 'leases.lock')
@@ -598,13 +706,19 @@ class Owner:
     borrower takes it, it is lent. beat() runs every few seconds: it keeps the owner's heartbeat, ends leases with none, grants a
     waiting exclusive request once nothing runs, and returns the lent slots that came back, for the run to use again."""
 
-    def __init__(self, all_cores, folder=FOLDER, names=docker_names, clock=time.time):
+    def __init__(self, all_cores, folder=FOLDER, names=docker_names, clock=time.time, run=None, stage='behaviour'):
+        """run: the run folder, named in the owner entry with stage and progress while the owner runs (OWNER_RUN_FIELDS)."""
         # names() reads the running containers before the lock is taken: nothing slow runs under it.
         self.all_cores, self.folder, self.names, self.clock = list(all_cores), folder, names, clock
         self.lent = set()
+        self.run, self.stage, self.progress = run, stage, None
 
     def owner_entry(self, now, running):
-        return {'name': 'plugincheck', 'pid': os.getpid(), 'heartbeat': now, 'running': True, 'servers': running, 'cores': self.all_cores}
+        entry = {'name': 'plugincheck', 'pid': os.getpid(), 'heartbeat': now, 'running': True, 'servers': running, 'cores': self.all_cores}
+        for field in OWNER_RUN_FIELDS:
+            if getattr(self, field) is not None:
+                entry[field] = getattr(self, field)
+        return entry
 
     def start(self):
         try:
@@ -659,11 +773,29 @@ class Owner:
         with Store(self.folder) as state:
             return owner_may_start(state)
 
+    def report(self, stage=None, progress=None):
+        """A stage change or a progress step, written to the owner entry at once with the heartbeat. Only while this owner holds the
+        entry: once it has stopped, or another owner has it, nothing is written. True when written."""
+        if stage is not None:
+            self.stage = stage
+        if progress is not None:
+            self.progress = dict(progress)
+        with Store(self.folder, wait=REPORT_WAIT) as state:
+            owner = state.get('owner')
+            if not (owner and owner.get('running') and owner.get('pid') == os.getpid()):
+                return False
+            owner['heartbeat'] = self.clock()
+            owner.update({field: getattr(self, field) for field in OWNER_RUN_FIELDS if getattr(self, field) is not None})
+            return True
+
     def stop(self):
-        """At the end of a run: slots still lent stay with their borrowers, the owner just stops running."""
+        """At the end of a run: slots still lent stay with their borrowers, the owner just stops running, and its run, stage and
+        progress go. Only this process's entry: one another owner has taken over is left alone."""
         with Store(self.folder) as state:
-            if state.get('owner'):
-                state['owner']['running'] = False
+            owner = state.get('owner')
+            if owner and owner.get('pid') == os.getpid():
+                owner['running'] = False
+                drop_owner_run(owner)
 
 
 class Lending:
@@ -722,6 +854,18 @@ class Lending:
             except Exception as error:
                 self.note('beat', error)
                 return []
+
+    def report(self, stage=None, progress=None):
+        """The run's stage or progress for the owner entry (Owner.report). Nothing after stop(), and an error never reaches the stage.
+        It holds no lock of its own while it writes: a stage's main thread calls it, and an interrupt handler that runs on that thread
+        (POSIX signals) calls stop(), which would wait for ever on a lock held under it. A report racing a stop is harmless, since both
+        take the lease file's lock and Owner.report writes only into a running entry."""
+        if self.owner is None or self.stopped:
+            return
+        try:
+            self.owner.report(stage, progress)
+        except Exception as error:
+            self.note('report', error)
 
     def stop(self):
         with self.ending:

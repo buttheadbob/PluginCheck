@@ -6,6 +6,7 @@ process is gone; an owner that stopped beating reads as not running.
 """
 import ast, contextlib, json, os, queue, shutil, subprocess, sys, tempfile, threading, time, types, unittest
 from unittest import mock
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

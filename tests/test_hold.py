@@ -4,6 +4,7 @@ An exclusive request waits for a full run's stages, not only for the behaviour s
 one waits or holds; any running container the lease file does not know holds the grant; lease.py tells borrowers.
 """
 import glob, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

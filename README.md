@@ -44,7 +44,9 @@ panel off with no warning. An AI running PluginCheck must do the same: [Agent.md
 `results.json` and the stage logs below.
 
 Results land in `runs/<target>/<timestamp>/`: `results.json`, updated after every stage, plus a log for each stage that can be followed live. Worlds and source copies are
-deleted afterwards. Add `--keep` to look at them.
+deleted afterwards. Add `--keep` to look at them. `PLUGINCHECK_RUNS_DIR` names another runs folder, such as the main checkout's for a copy
+whose runs should show beside the others. Every run gets a new folder: a timestamp whose folder is already there is never used again,
+and the next free second is taken instead (`stages/runfolders.py`).
 
 A target can give the `behaviour` stage a `behaviour` section, all of it optional:
 
@@ -288,8 +290,24 @@ such as mod or Torch fixes. They may not borrow them to check another plugin: th
   the drain still waits for, `exclusiveHeld` says the machine is held, and `status` adds `stages` (the Docker stages of full runs in
   progress) and `unknownContainers`.
 
-The leases are one file, `machine/leases.json` in this folder (`PLUGINCHECK_MACHINE_DIR` moves it), changed under a
-lock. Sessions use `lease.py`:
+The leases are one file, `leases.json`, changed under a lock. It is in `machine/` in this folder unless a shared folder is set, so
+that every copy and session on the computer meets in one file: `PLUGINCHECK_MACHINE_DIR`, or else `machine-dir.txt` in this folder
+(not tracked by git) holding one line, the folder's absolute path. A `machine-dir.txt` that is empty, holds more than one line or a
+relative path stops with an error naming it, rather than leaving the run in a folder of its own. A run copy made by copying the
+checkout keeps sharing the folder only if `machine-dir.txt` is copied with it. PluginCheck's own tests always set
+`PLUGINCHECK_MACHINE_DIR` to a scratch folder (`tests/scratchmachine.py`), and `tests/test_machine_guard.py` fails if a test opens the
+folder the checkout would use without it.
+
+While the behaviour stage runs, its `owner` entry also says what the run is doing, for a machine view: `run`, the run folder as an
+absolute path; `stage`, such as `behaviour: servers`; and `progress`, the numbers the live panel shows (`done`, `total`, `left`,
+`overall`, `failed`). They are written when the stage starts, at each stage change and each finished server, and with every
+heartbeat, and only while that owner runs. They are removed at once at the end of the stage, on an interrupt or a closed console, and
+when the stage ends on a Python error. After a hard kill they go at the next change to the file once the owner's process is gone (a
+full run's own heartbeat makes one every 30 seconds while it goes; `lease.py status` makes one too); a viewer that checks the owner's
+heartbeat stops trusting them within 2 minutes in any case. After a hard kill the run folder is marked ended at the same moment: its
+`live.json` finished, with the running stage `not run`, and a `results.json` with every stage `not run` if it had none.
+
+Sessions use `lease.py`:
 
 ```
 python lease.py request   --session NAME --count 2 --purpose "mod fix test"

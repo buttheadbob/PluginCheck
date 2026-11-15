@@ -7,6 +7,7 @@ up ones where it does not, always the same for the same build, scenario, repeat 
 can be compared result for result.
 """
 import ast, atexit, contextlib, hashlib, io, json, os, queue, random, shutil, sys, tempfile, threading, time, types
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGES = os.path.normpath(os.path.join(HERE, '..', 'stages'))
@@ -57,6 +58,9 @@ def fake_leases():
         def beat(self, running):
             return []
 
+        def report(self, stage=None, progress=None):
+            pass
+
         def note(self, *args):
             pass
 
@@ -64,7 +68,7 @@ def fake_leases():
             pass
 
     module.Lending = Lending
-    module.Owner = lambda *args: None
+    module.Owner = lambda *args, **kwargs: None
     # pin.args(): containers outside a slot are not pinned in a replay, and Docker is not asked how many cores it has.
     module.reserved_cores = lambda: set()
     return module

@@ -1,5 +1,6 @@
 """Per-server timing in behaviour. Run with: python -I -m unittest discover -s tests"""
 import ast, copy, json, os, sys, tempfile, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGES = os.path.join(HERE, '..', 'stages')

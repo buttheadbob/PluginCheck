@@ -4,6 +4,7 @@ A wrong split reuses stale results, so these check which code is hashed, that a 
 does not.
 """
 import ast, hashlib, json, os, shutil, sys, tempfile, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGES = os.path.normpath(os.path.join(HERE, '..', 'stages'))

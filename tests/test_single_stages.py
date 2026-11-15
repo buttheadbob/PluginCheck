@@ -5,6 +5,7 @@ Each stage runs as it is, in a process of its own, with Docker replaced by a sta
 call and answers it, and with time.sleep made instant.
 """
 import ast, json, os, re, shutil, subprocess, sys, tarfile, tempfile, unittest, zipfile
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

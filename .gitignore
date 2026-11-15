@@ -4,6 +4,8 @@ runs/
 cache/
 # Slot leases shared with other sessions. See README.md
 machine/
+# This computer's shared lease folder, if any: one line, an absolute path. See README.md
+machine-dir.txt
 __pycache__/
 # A GitHub token. See stages/githubtoken.py
 github-token.txt

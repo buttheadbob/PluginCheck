@@ -172,6 +172,12 @@ def status(**fields):
     print('@@' + json.dumps(fields), flush=True)
 
 
+def progress(**fields):
+    """A progress step, for the live panel and for the owner entry in the lease file, which a machine view reads (leases.Owner.report)."""
+    status(kind='progress', **fields)
+    lending.report(progress=fields)
+
+
 def read_text(path):
     return open(path, encoding='utf-8', errors='replace').read() if os.path.exists(path) else ''
 
@@ -1017,7 +1023,7 @@ def say_safely(text):
         print(text, flush=True)
 
 
-lending = leases.Lending(None if DISCOVER_ONLY else lambda: leases.Owner(all_slots), say=say_safely)
+lending = leases.Lending(None if DISCOVER_ONLY else lambda: leases.Owner(all_slots, run=run_dir), say=say_safely)
 # On every way out, finish() and a crash too, so other sessions do not wait on a run that has ended. The servers go first (atexit runs the
 # last registered first).
 atexit.register(lending.stop)
@@ -1219,6 +1225,7 @@ for build in builds:
 shutil.rmtree(os.path.join(work, 'torch-libs'), ignore_errors=True)
 
 print('discovering each build', flush=True)
+lending.report(stage='behaviour: discovering builds')
 fingerprints = {b['name']: build_hash(b) for b in builds}
 tools = tool_hash()
 games = {host: game_hash(host) for host in {b['host'] for b in builds}}
@@ -1381,6 +1388,7 @@ for (build, batch, repeat), results in kept_results:
     take(build, repeat, results)
 
 finished = 0
+lending.report(stage='behaviour: servers')
 # A server gives its cores back when it is killed (serve), and its clean-up then runs beside the next server. The spare threads are what start
 # that next server: they wait in run_server for a slot, so the slots, not the threads, still decide how many servers run.
 pool_threads = workers + max(2, workers // 4)
@@ -1392,7 +1400,7 @@ with concurrent.futures.ThreadPoolExecutor(pool_threads) as pool:
         results = future.result()
         elapsed = time.time() - started
         left = (len(jobs) - done) * elapsed / done
-        status(kind='progress', done=done, total=len(jobs), left=int(left), overall=int(left + after_stage), failed=len(failures))
+        progress(done=done, total=len(jobs), left=int(left), overall=int(left + after_stage), failed=len(failures))
         moved = sum(len(touched(r)) for r in results if 'after' in r)
         print(f"[{done}/{len(jobs)} {done * 100 // len(jobs)}%] {clock(left)} left here, {clock(left + after_stage)} left overall  |  "
               f"{build['name']}  {' + '.join(p['name'] for p in batch)}: {results[0]['state']} in {results[0]['seconds']}s, {moved} changes", flush=True)
@@ -1406,6 +1414,7 @@ if suspect:
     again = [(b, {**by_name[n]}, r) for n in sorted(suspect) for b in usable if runs_on(b, by_name[n]) for r in range(REPEATS)]
     # They join the count, so the progress never says done while these still run.
     total = len(jobs) + len(again)
+    lending.report(stage='behaviour: alone reruns')
     with concurrent.futures.ThreadPoolExecutor(pool_threads) as pool:
         futures = {pool.submit(run_and_remember, b, [p], r, time.time()): (b, r, p['name']) for b, p, r in again}
         for future in concurrent.futures.as_completed(futures):
@@ -1413,7 +1422,7 @@ if suspect:
             finished += 1
             elapsed = time.time() - started
             left = (total - finished) * elapsed / max(finished, 1)
-            status(kind='progress', done=finished, total=total, left=int(left), overall=int(left + after_stage), failed=len(failures))
+            progress(done=finished, total=total, left=int(left), overall=int(left + after_stage), failed=len(failures))
             print(f"[{finished}/{total} {finished * 100 // total}%] {clock(left)} left here, {clock(left + after_stage)} left overall  |  "
                   f"{build['name']}  alone: {alone}", flush=True)
             for record in future.result():

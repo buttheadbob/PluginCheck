@@ -4,6 +4,7 @@ Every container is pinned, --continue refuses what it must, and the lane holds o
 for an exclusive request and gives the slot back. No Docker and no real lease file: leases use a temporary folder.
 """
 import ast, glob, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

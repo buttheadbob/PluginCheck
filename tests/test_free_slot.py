@@ -1,5 +1,6 @@
 """The slot goes back at kill, and the wait asks Docker less. Run with: python -I -m unittest discover -s tests"""
 import ast, itertools, json, os, re, shutil, sys, threading, time, types, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

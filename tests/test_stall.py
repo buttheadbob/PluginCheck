@@ -1,6 +1,7 @@
 """A server that has stopped logging ends as a timeout after 10 minutes, not 20.
 Run with: python -I -m unittest discover -s tests"""
 import ast, itertools, os, sys, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

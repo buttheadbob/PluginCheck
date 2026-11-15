@@ -15,6 +15,12 @@ because it is how the user watches a run. `stages/display.py` only draws it on a
    `tee`, and do not set `PLUGINCHECK_PLAIN=1` unless the user asks. Any of these turns the panel off.
 3. Follow the run from its files, not its output. `runs/<target>/<timestamp>/results.json` is updated after every stage, and each stage's log
    can be followed live, so nothing needs capturing.
+4. A run under a session's exclusive lease (a pass that needs the machine to itself) uses the shared lease folder like any run, so the
+   machine view shows it as the owner: the checkout or run copy carries `machine-dir.txt` (README, Lending slots). Never point
+   `PLUGINCHECK_MACHINE_DIR` at a scratch folder for it. The run holds still while any exclusive lease or request is in that file, its
+   holder's too, so the holder must release its exclusive lease before it starts the run. One run at a time and the machine gate then
+   keep other runs and sessions' gated work out. The limit: a lease request (`lease.py request`) is not gated, so in the moment between
+   the release and the run's start, and while it runs (all but the 4 slots the run keeps), another session can still be granted slots.
 
 ## Get ready before a full run
 

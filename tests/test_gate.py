@@ -5,6 +5,7 @@ timeout names who claims the machine and since when. A claim made while a full r
 then ends, with no wait of its own, and the run's next stage and the gated work go on once it is released.
 """
 import json, os, shutil, subprocess, sys, tempfile, threading, time, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, '..'))

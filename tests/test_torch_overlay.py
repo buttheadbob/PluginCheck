@@ -1,6 +1,7 @@
 """A Torch variant with an overlay runs a zip built from the working source with the overlay laid over it.
 Run with: python -I -m unittest discover -s tests"""
 import ast, os, shutil, sys, tempfile, types, unittest, zipfile
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGES = os.path.normpath(os.path.join(HERE, '..', 'stages'))

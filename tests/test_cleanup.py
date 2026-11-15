@@ -1,5 +1,6 @@
 """Every working folder a stage makes in the run folder is removed when the run ends. Run with: python -I -m unittest discover -s tests"""
 import ast, glob, os, re, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 # Kept on purpose: logs, which a person or an AI reads after the run.

@@ -9,7 +9,7 @@ import argparse, atexit, contextlib, datetime, glob, hashlib, json, os, shutil, 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'stages'))
 from display import Display, STALLED, STATUS_MARK, clock, stalled
-import classification, githubtoken, leases, prerun
+import classification, githubtoken, leases, prerun, runfolders
 import pin
 
 STAGES = {
@@ -100,9 +100,8 @@ if args.resume:
     if not os.path.isfile(os.path.join(run_dir, 'results.json')):
         sys.exit(f'{run_dir} is not a run folder.')
 else:
-    run_dir = os.path.join(HERE, 'runs', target['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-if not args.resume:
-    os.makedirs(run_dir)
+    # <runs>\<target>\<stamp>, a new folder of its own (stages/runfolders.py; PLUGINCHECK_RUNS_DIR names another runs folder).
+    run_dir = runfolders.new(target['name'])
 target_file = os.path.join(run_dir, 'target.json')
 if not args.resume:
     json.dump(target, open(target_file, 'w', encoding='utf-8'), indent=1)
@@ -160,7 +159,7 @@ def needed(stage):
 def past_seconds():
     """How long each stage took the last time it ran for this plugin, which is the best estimate there is."""
     seconds = {}
-    for result in sorted(glob.glob(os.path.join(HERE, 'runs', target['name'], '*', 'results.json')), reverse=True):
+    for result in sorted(glob.glob(os.path.join(runfolders.root(), target['name'], '*', 'results.json')), reverse=True):
         try:
             stages = json.load(open(result, encoding='utf-8'))['stages']
         except (OSError, ValueError, KeyError):

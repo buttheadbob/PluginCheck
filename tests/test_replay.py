@@ -4,6 +4,7 @@ The replays run behaviour.py as it is, with Docker and the servers replaced (rep
 such as the one before a change, set PLUGINCHECK_REPLAY_BEFORE to its path: the old-against-new tests run only then.
 """
 import glob, json, os, shutil, sys, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

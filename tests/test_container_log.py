@@ -1,5 +1,6 @@
 """A server's container.log keeps what its entrypoint printed on stderr. Run with: python -I -m unittest discover -s tests"""
 import ast, os, types, unittest
+import scratchmachine  # noqa: F401  (before anything of PluginCheck's: keeps every test off the real lease folders)
 
 SOURCE = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'stages', 'behaviour.py'))
 
